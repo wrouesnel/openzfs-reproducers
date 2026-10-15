@@ -1,0 +1,25 @@
+# The build environment for a linux-ubuntu* base, its ZFS builds and its
+# reproducer images (builder/build.sh makes it; nothing here is published).
+ARG IMAGE
+FROM ${IMAGE}
+ARG SNAPSHOT
+ARG KERNEL
+ENV DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8
+# packages come from the Ubuntu snapshot service at SNAPSHOT (needs
+# ca-certificates first, from the image's own archive)
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates >/dev/null && \
+    printf 'APT::Snapshot "%s";\n' "$SNAPSHOT" >/etc/apt/apt.conf.d/50snapshot && \
+    apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+	build-essential autoconf automake libtool gawk pkg-config git curl \
+	libblkid-dev uuid-dev libudev-dev libssl-dev zlib1g-dev libaio-dev libattr1-dev \
+	libelf-dev libtirpc-dev libffi-dev libcurl4-openssl-dev libpam0g-dev python3 \
+	busybox-static bash util-linux bsdextrautils mawk binutils e2fsprogs cpio kmod \
+	xz-utils zstd qemu-utils diffutils findutils coreutils ncurses-base ncurses-term \
+	fdisk file \
+	"linux-headers-$KERNEL" "linux-modules-$KERNEL" >/dev/null && \
+    cd /tmp && apt-get download -qq "linux-image-$KERNEL" && \
+    dpkg -x linux-image-*.deb /tmp/kimg && cp /tmp/kimg/boot/vmlinuz-* /boot/ && \
+    dpkg-deb -f linux-image-*.deb Package Version Source >/boot/zfs-repro-kernel.pkg && \
+    rm -rf /tmp/kimg /tmp/*.deb /var/lib/apt/lists/* && \
+    depmod "$KERNEL" && ls -l "/boot/vmlinuz-$KERNEL" "/lib/modules/$KERNEL/modules.dep"

@@ -1,0 +1,6 @@
+# A reproducer image: FROM its base, plus the reproducer disk (the OpenZFS
+# builds and the demo) and its sources.  Labels come from builder/build.sh.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY repro/ /zfs-repro/repro/
+COPY sources/ /sources/repro/

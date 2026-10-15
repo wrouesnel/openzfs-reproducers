@@ -1,0 +1,11 @@
+# The runtime layer every reproducer image shares: qemu and the entrypoint.
+FROM docker.io/library/alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+RUN apk add --no-cache bash socat coreutils qemu-system-x86_64 qemu-img tmux sfdisk grep less ncurses-terminfo-base && \
+    cd /usr/share/qemu && rm -rf edk2-* *.dtb hppa-* palcode-* openbios-* s390-* skiboot* \
+	slof* u-boot* opensbi* npcm* QEMU,* pnv-* qemu_vga.ndrv vof* && \
+    mkdir -p /runs /sources
+COPY zfs-repro-vm /zfs-repro/bin/zfs-repro-vm
+WORKDIR /runs
+ENTRYPOINT ["/zfs-repro/bin/zfs-repro-vm"]
+LABEL org.opencontainers.image.source="https://github.com/wrouesnel/openzfs-reproducers" \
+      org.opencontainers.image.description="zfs-repro runtime: qemu and the launcher (no reproducer)"

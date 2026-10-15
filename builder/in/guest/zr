@@ -1,0 +1,54 @@
+#!/bin/bash
+# zr: the guest side of the zfs-repro host channel (installed as /demo/bin/zr).
+# A line protocol on the VM's third serial port (Linux /dev/ttyS2): the guest
+# sends `ZR ID VERB ARGS...`, the container's orchestrator answers
+# `ZR ID RC TEXT` once it is done.  Every call blocks until the answer.
+#   zr trigger NAME [ARGS]  ask the host to act (pause, powercut, unplug N, plug N,
+#                           errors N read|write|rw [SECTOR], clear-errors N,
+#                           throttle N IOPS [BPS], unthrottle N, zero N OFF LEN,
+#                           copy N FILE, type VM TEXT, sleep S, or host.sh's own)
+#   zr wait NAME [ARGS]     wait for something on the host side (host.sh's wait_NAME;
+#                           built in: output VM ERE [SECONDS])
+#   zr env                  VM=, VMS=, HOSTID=, IP=, PEER= of this VM
+#   zr setup                set this VM's hostid and network address from zr env
+#   zr log TEXT             a line in the host log
+#   zr phase [N]            print the demo's phase (0 at first), or set it to N
+#                           (kept on the root disk, synced: it survives a power cut)
+# Exit status: the host's (0 = done; 127 = the host has no such trigger).
+set -u
+dev=/dev/ttyS2; [ "$(uname -s)" = FreeBSD ] && dev=/dev/cuau2
+req() {
+	local id=$$$RANDOM line rc
+	exec 3<>"$dev" || { echo "zr: no host channel $dev" >&2; exit 2; }
+	if [ "$(uname -s)" = FreeBSD ]; then stty -f "$dev" raw -echo 115200
+	else stty -F "$dev" raw -echo 115200; fi 2>/dev/null
+	printf 'ZR %s %s\n' "$id" "$*" >&3
+	while IFS= read -r line <&3; do
+		line=${line//$'\r'/}
+		set -f; set -- $line; set +f
+		[ "${1:-}" = ZR ] && [ "${2:-}" = "$id" ] || continue
+		rc=${3:-1}; shift 3
+		[ $# -gt 0 ] && echo "$*"
+		exit "$rc"
+	done
+	exit 2
+}
+case ${1:-} in
+trigger | wait | env | log) (req "$@") ;;
+setup)
+	eval "$(req env)"
+	if [ -n "${HOSTID:-}" ]; then
+		h=$(printf '%08x' "$((16#$HOSTID))")
+		printf "\\x${h:6:2}\\x${h:4:2}\\x${h:2:2}\\x${h:0:2}" >/etc/hostid
+		[ -w /sys/module/spl/parameters/spl_hostid ] && echo "$((16#$h))" >/sys/module/spl/parameters/spl_hostid
+	fi
+	if [ -n "${IP:-}" ]; then
+		ip link set lo up; ip link set eth0 up; ip addr add "$IP/24" dev eth0
+	fi
+	hostname "zr-vm${VM:-0}"
+	echo "zr: vm$VM of $VMS, hostid ${HOSTID:-unset}, address ${IP:-none}${PEER:+, peer $PEER}" ;;
+phase)
+	f=/root/.zr-phase
+	if [ $# -ge 2 ]; then echo "$2" >"$f"; sync; else cat "$f" 2>/dev/null || echo 0; fi ;;
+*) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 2 ;;
+esac

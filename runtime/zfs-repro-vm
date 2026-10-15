@@ -1,0 +1,607 @@
+#!/bin/bash
+# zfs-repro-vm: the container's entrypoint and VM orchestrator.  Boots the
+# reproducer in this image in one or more tiny VMs (qemu-system-x86_64 inside
+# the container) and puts you on the first VM's serial console.
+#
+#   podman run --rm -it --device /dev/kvm IMAGE [LABEL] [--console]
+#   podman run --rm --device /dev/kvm IMAGE LABEL --check      (exit 0 = as expected)
+#   podman run --rm -it --device /dev/kvm -v ./runs:/runs IMAGE LABEL --disk /runs/FILE.raw
+#   podman run --rm IMAGE --info | --sources | --help
+#
+# LABEL is one of the image's OpenZFS builds, usually "bug" (unfixed) and
+# "fix" (the proposed fix); the default is the first.  At the VM's root
+# prompt, Up, Enter runs the demo, which prints a RESULT line; `poweroff`
+# exports the demo's pool and ends the VM; Ctrl-] leaves at once (and stops
+# the VMs).
+#
+# The container is the VMs' host, so a reproducer can also act from outside
+# them: its host.sh (and the built-in triggers below) can pause a VM, cut its
+# power and boot it again, hot-unplug a disk, inject I/O errors, throttle a
+# disk, rewrite a disk image between boots, or type on another VM's console.
+# The demo asks for these with `zr trigger NAME ARGS` in the guest (a line
+# protocol on the VM's third serial port).  See docs/reproducer-format.md.
+#
+# Files: the base system (/zfs-repro/base), the reproducer disk and host.sh
+# (/zfs-repro/repro) and the sources (/sources) are read-only image layers.
+# Each run makes throwaway overlays of the base and new sparse run disks in
+# /runs (the container's writable layer; mount a volume there to keep them).
+# Environment: ZFS_REPRO_ACCEL (kvm|tcg), MEM, CPUS, TIMEOUT (override the
+# reproducer's defaults), ZFS_REPRO_RUNS (default /runs).
+
+B=/zfs-repro/base R=/zfs-repro/repro
+SELF=$(readlink -f "$0")
+say() { printf '%s\n' "$*"; }
+warn() { printf 'zfs-repro: %s\n' "$*" >&2; }
+die() { warn "$*"; exit 2; }
+q() {
+	case $1 in
+	'' | *[!A-Za-z0-9_./=:,+@%^-]*) printf "'%s'" "${1//\'/\'\\\'\'}" ;;
+	*) printf '%s' "$1" ;;
+	esac
+}
+qcmd() { local s= a; for a in "$@"; do printf '%s' "$s"; q "$a"; s=' '; done; printf '\n'; }
+# v FILE KEY: a value from a shell-style KEY=VALUE file (ours: trusted)
+v() { (. "$1" >/dev/null 2>&1; eval "printf '%s' \"\${$2:-}\""); }
+rv() { v "$R/repro.conf" "$1"; }
+bv() { v "$B/base.conf" "$1"; }
+
+info() {
+	say "zfs-repro reproducer $(rv ID): $(rv TITLE)"
+	for n in $(rv PRS); do say "  PR:     https://github.com/openzfs/zfs/pull/$n"; done
+	for n in $(rv ISSUES); do say "  issue:  https://github.com/openzfs/zfs/issues/$n"; done
+	[ -n "$(rv BRANCH)" ] && say "  branch: $(rv BRANCH)"
+	say "  system: $(bv NAME): $(bv DISTRO), $(bv OS) $(bv KERNEL)"
+	say "  VMs:    $(rv VMS | sed 's/^$/1/'), run disks: $(rv DISKS) x $(rv DISK_SIZE)$([ "$(rv SHARED_DISKS)" = 1 ] && echo ' (shared by the VMs)')$([ -f "$R/host.sh" ] && echo ', host.sh triggers')"
+	for l in $(rv BUILDS); do
+		say "  build '$l': $(rv "BUILD_$l")"
+		say "      $(rv "BUILD_${l}_MARKER") ($(rv "BUILD_${l}_ZFS"))"
+		say "      expect: $(rv "EXPECT_$l")"
+	done
+	say "  sources: /sources (podman run --rm IMAGE --sources)"
+}
+
+detect_accel() {
+	ACCEL=${ZFS_REPRO_ACCEL:-}
+	if [ -z "$ACCEL" ]; then
+		[ -c /dev/kvm ] && (: <>/dev/kvm) 2>/dev/null && ACCEL=kvm
+	fi
+	ACCEL=${ACCEL:-tcg} CPU=host TMULT=1
+	if [ "$ACCEL" = tcg ]; then
+		CPU=max TMULT=10
+		if [ -c /dev/kvm ]; then
+			warn "/dev/kvm is there but not usable (rootless podman: add --group-add keep-groups)"
+		else
+			warn "no /dev/kvm (podman run --device /dev/kvm ...)"
+		fi
+		warn "using software emulation (TCG): roughly 10-50x slower"
+	fi
+}
+
+# ---- state: everything the orchestrator's processes share is in $D ----------
+# D/env            the facts below, sourced by every helper process
+# D/vmI.s0.{in,out}   serial0 (root shell) fifos   D/vmI.ctl.{in,out}  the zr channel
+# D/vmI.qmp        QMP socket   D/vmI.pid   D/vmI.disks (one path per line)
+# D/net0.sock      the VM0-VM1 link (NETWORK=1)
+setup() {
+	[ -f "$R/repro.conf" ] && [ -f "$B/base.conf" ] || die "this image has no reproducer (only the runtime or a base)"
+	ID=$(rv ID) LABELS=$(rv BUILDS)
+	[ -n "$LABEL" ] || LABEL=${LABELS%% *}
+	case " $LABELS " in *" $LABEL "*) ;; *) die "no build '$LABEL' here (builds: $LABELS)" ;; esac
+	[ "$(bv KERNEL)" = "$(rv KERNEL)" ] || die "the reproducer is for kernel $(rv KERNEL), the base has $(bv KERNEL)"
+	BOOT=$(bv BOOT) RUNDISK=$(bv RUN_DISK)
+	MEM=${MEM:-$(rv MEM)} CPUS=${CPUS:-$(rv CPUS)} TIMEOUT=${TIMEOUT:-$(rv TIMEOUT)}
+	DISKS=$(rv DISKS) BYTES=$(rv DISK_BYTES)
+	VMS=$(rv VMS); VMS=${VMS:-1}
+	SHARED=$(rv SHARED_DISKS); SHARED=${SHARED:-0}
+	NETWORK=$(rv NETWORK); NETWORK=${NETWORK:-0}
+	HOSTIDS=$(rv HOSTIDS) RESULT_VM=$(rv RESULT_VM); RESULT_VM=${RESULT_VM:-0}
+	[ "$NETWORK" = 1 ] && [ "$VMS" != 2 ] && die "NETWORK=1 needs VMS=2"
+	RUN=${ZFS_REPRO_RUNS:-/runs}
+	mkdir -p "$RUN" || die "cannot create $RUN"
+	[ -w "$RUN" ] || die "$RUN is not writable (rootless podman may need :U on the volume, SELinux :Z)"
+}
+
+hlog() { printf '%s %s\n' "$(date -u +%T)" "$*" >>"$HLOG"; }
+envfile() {
+	{
+		for k in ID LABEL BOOT RUNDISK MEM CPUS TIMEOUT DISKS BYTES VMS SHARED NETWORK HOSTIDS \
+		    RESULT_VM RUN D TS ACCEL CPU TMULT HLOG INSPECT; do
+			printf '%s=%s\n' "$k" "$(q "${!k}")"
+		done
+	} >"$D/env"
+}
+loadenv() { D=$1; . "$D/env"; }
+
+log0() { echo "$RUN/$(vmpfx "$1")$LABEL-$TS.serial0.log"; }
+log1() { echo "$RUN/$(vmpfx "$1")$LABEL-$TS.serial1.log"; }
+vmpfx() { [ "$1" = 0 ] || echo "vm$1-"; }
+
+prepare() {
+	TS=$(date -u +%Y%m%dT%H%M%SZ)
+	D=$RUN/.zr-$LABEL-$TS
+	mkdir -p "$D" || die "cannot create $D"
+	HLOG=$RUN/$LABEL-$TS.host.log
+	: >"$HLOG"
+	local i n f
+	for i in $(seq 0 $((VMS - 1))); do
+		qemu-img create -q -f qcow2 -F qcow2 -b "$B/base.qcow2" "$D/vm$i.overlay.qcow2" || die "qemu-img failed"
+		: >"$(log0 "$i")"; : >"$(log1 "$i")"
+		for f in s0 ctl; do mkfifo "$D/vm$i.$f.in" "$D/vm$i.$f.out"; done
+		: >"$D/vm$i.disks"
+	done
+	if [ -n "$INSPECT" ]; then
+		for f in $INSPECT; do echo "$f" >>"$D/vm0.disks"; done
+	else
+		mkdisk() {
+			truncate -s "$BYTES" "$1" || die "cannot create $1"
+			# no udev in the Linux base, so zpool can't partition a whole
+			# disk: each run disk gets a GPT with one ZFS partition
+			if [ "$RUNDISK" = gpt-zfs ]; then
+				printf 'label: gpt\nname=zfsdemo, type=6A898CC3-1DD2-11B2-99A6-080020116501\n' |
+				    sfdisk -q "$1" >/dev/null || die "sfdisk failed on $1"
+			fi
+		}
+		for i in $(seq 0 $((VMS - 1))); do
+			for n in $(seq 0 $((DISKS - 1))); do
+				if [ "$SHARED" = 1 ]; then f=$RUN/$LABEL-$TS
+				else f=$RUN/$(vmpfx "$i")$LABEL-$TS; fi
+				[ "$DISKS" -gt 1 ] && f=$f-$n
+				f=$f.raw
+				[ -f "$f" ] || mkdisk "$f"
+				echo "$f" >>"$D/vm$i.disks"
+			done
+		done
+	fi
+	envfile
+}
+
+# ---- the VMs ------------------------------------------------------------------
+qemu_args() {	# qemu_args I: the command line of VM I in the array A
+	local i=$1 n=0 f ser=zfsdemo-run share=
+	[ -n "$INSPECT" ] && ser=zfsdemo-insp
+	[ "$SHARED" = 1 ] && share=,share-rw=on
+	A=(qemu-system-x86_64 -name "zfs-repro-$ID-$LABEL-vm$i" -machine "pc,accel=$ACCEL" -cpu "$CPU"
+	    -m "$MEM" -smp "$CPUS" -nodefaults -no-user-config -display none -no-reboot)
+	if [ "$BOOT" = kernel ]; then
+		A+=(-kernel "$B/vmlinuz")
+		[ -f "$B/initrd" ] && A+=(-initrd "$B/initrd")
+		A+=(-append "$(bv CMDLINE)" -drive "file=$D/vm$i.overlay.qcow2,format=qcow2,if=none,id=d0,cache=unsafe"
+		    -device virtio-blk-pci,drive=d0)
+	else
+		A+=(-drive "file=$D/vm$i.overlay.qcow2,format=qcow2,if=none,id=d0,cache=unsafe"
+		    -device virtio-blk-pci,drive=d0,bootindex=0)
+	fi
+	# the reproducer, read-only; its serial selects the build the guest loads
+	A+=(-drive "file=$R/repro.qcow2,format=qcow2,if=none,id=d1,readonly=on"
+	    -device "virtio-blk-pci,drive=d1,serial=zfsdemo-build-$LABEL")
+	# run disks as node chains file fN -> raw rN -> device rdN, so filters
+	# (blkdebug errors) can be put between fN and rN while the VM runs
+	while read -r f; do
+		[ -n "$f" ] || continue
+		A+=(-blockdev "driver=file,node-name=f$n,filename=$f,locking=off"
+		    -blockdev "driver=raw,node-name=r$n,file=f$n"
+		    -device "virtio-blk-pci,drive=r$n,id=rd$n,serial=$ser$n$share")
+		n=$((n + 1))
+	done <"$D/vm$i.disks"
+	if [ "$NETWORK" = 1 ]; then
+		local srv=off; [ "$i" = 0 ] && srv=on
+		A+=(-netdev "stream,id=n0,server=$srv,addr.type=unix,addr.path=$D/net0.sock$([ $srv = off ] && echo ,reconnect-ms=500)"
+		    -device "virtio-net-pci,netdev=n0,mac=52:54:00:5a:00:0$((i + 1))")
+	fi
+	A+=(-device virtio-rng-pci
+	    -chardev "pipe,id=s0,path=$D/vm$i.s0,logfile=$(log0 "$i"),logappend=on" -serial chardev:s0
+	    -chardev "file,id=s1,path=$(log1 "$i"),append=on" -serial chardev:s1
+	    -chardev "pipe,id=ctl,path=$D/vm$i.ctl" -serial chardev:ctl
+	    -qmp "unix:$D/vm$i.qmp,server=on,wait=off")
+}
+vm_start() {	# vm_start I: boot VM I (again: same overlay and disks)
+	local i=$1
+	qemu_args "$i"
+	rm -f "$D/vm$i.qmp"
+	hlog "vm$i: start"
+	"${A[@]}" >>"$D/vm$i.qemu.out" 2>&1 </dev/null 5<&- 6<&- &
+	echo $! >"$D/vm$i.pid"
+	local n=50; while [ ! -S "$D/vm$i.qmp" ] && [ $n -gt 0 ]; do sleep 0.1; n=$((n - 1)); done
+}
+vm_alive() { local p; p=$(cat "$D/vm$1.pid" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+any_alive() { local i; for i in $(seq 0 $((VMS - 1))); do vm_alive "$i" && return 0; done; return 1; }
+vm_kill() { local p; p=$(cat "$D/vm$1.pid" 2>/dev/null) && kill "$p" 2>/dev/null; }
+
+# qmp VM JSON: one QMP command on its own session; prints the reply, rc 1 on an error
+qmp() {
+	local s=$D/vm$1.qmp line rc=1
+	[ -S "$s" ] || { hlog "qmp vm$1: not running"; return 1; }
+	coproc QMPC { exec socat - "UNIX-CONNECT:$s" 2>/dev/null; }
+	local o=${QMPC[0]} w=${QMPC[1]} p=$QMPC_PID
+	read -r -t 5 line <&"$o"
+	printf '{"execute":"qmp_capabilities"}\n' >&"$w"
+	read -r -t 5 line <&"$o"
+	printf '%s\n' "$2" >&"$w"
+	while read -r -t 60 line <&"$o"; do
+		case $line in
+		*'"return"'*) rc=0; break ;;
+		*'"error"'*) break ;;
+		*) hlog "vm$1 qmp event: $line" ;;
+		esac
+	done
+	kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
+	hlog "vm$1 qmp $2 -> $line"
+	printf '%s\n' "$line"
+	return $rc
+}
+hmp() { qmp "$1" "{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"$2\"}}"; }
+
+vm_type() { printf '%s' "$2" 1<>"$D/vm$1.s0.in"; }	# type on VM I's console
+# vm_wait I ERE SECONDS [OFFSET]: wait for ERE in VM I's console log (after byte OFFSET)
+vm_wait() {
+	local n=$(($3 * 5 * TMULT)) l; l=$(log0 "$1")
+	while [ $n -gt 0 ]; do
+		tail -c +$((${4:-0} + 1)) "$l" | grep -aEq "$2" && return 0
+		sleep 0.2; n=$((n - 1))
+	done
+	hlog "vm$1: timed out waiting for /$2/"; return 1
+}
+logsize() { wc -c <"$(log0 "$1")" | tr -d ' '; }
+UP=$'\033[A\r'
+# vm_run_demo I [OFFSET]: wait for the prompt, then Up, Enter (the traced demo)
+vm_run_demo() { vm_wait "$1" 'press Up, Enter' 90 "${2:-0}" && sleep 1.5 && vm_type "$1" "$UP"; }
+vm_pause() { qmp "$1" '{"execute":"stop"}' >/dev/null; }
+vm_resume() { qmp "$1" '{"execute":"cont"}' >/dev/null; }
+# vm_powercut I: power off at once (no export, no sync in the guest)
+vm_powercut() {
+	local n=50
+	qmp "$1" '{"execute":"quit"}' >/dev/null
+	while vm_alive "$1" && [ $n -gt 0 ]; do sleep 0.1; n=$((n - 1)); done
+	vm_alive "$1" && vm_kill "$1"
+	hlog "vm$1: power cut"
+}
+# vm_reboot I: power cut, boot again, and run the demo again (it reads its
+# phase from /root/.zr-phase: zr phase)
+vm_reboot() { local o; vm_powercut "$1"; o=$(logsize "$1"); vm_start "$1"; vm_run_demo "$1" "$o"; }
+vm_poweroff() {	# clean: poweroff typed at the prompt (exports the pools)
+	local n=150
+	vm_alive "$1" || return 0
+	vm_type "$1" $'\003'; sleep 0.3; vm_type "$1" $'poweroff\r'
+	while vm_alive "$1" && [ $n -gt 0 ]; do sleep 0.2; n=$((n - 1)); done
+	vm_alive "$1" && { hlog "vm$1: still running after poweroff; killing it"; vm_kill "$1"; }
+}
+
+disk_path() { sed -n "$(($2 + 1))p" "$D/vm$1.disks"; }
+disk_unplug() {	# disk_unplug VM N: hot-unplug run disk N (the guest sees it go)
+	local n=50
+	qmp "$1" "{\"execute\":\"device_del\",\"arguments\":{\"id\":\"rd$2\"}}" >/dev/null || return 1
+	while qmp "$1" '{"execute":"qom-list","arguments":{"path":"/machine/peripheral"}}' | grep -q "\"rd$2\"" && [ $n -gt 0 ]; do
+		sleep 0.2; n=$((n - 1))
+	done
+	[ $n -gt 0 ]
+}
+disk_plug() {	# disk_plug VM N: plug run disk N back in
+	local ser=zfsdemo-run share=; [ -n "$INSPECT" ] && ser=zfsdemo-insp
+	[ "$SHARED" = 1 ] && share=',"share-rw":true'
+	qmp "$1" "{\"execute\":\"device_add\",\"arguments\":{\"driver\":\"virtio-blk-pci\",\"drive\":\"r$2\",\"id\":\"rd$2\",\"serial\":\"$ser$2\"$share}}" >/dev/null
+}
+# disk_errors VM N RULES: put a blkdebug filter with RULES (a JSON list of
+# inject-error rules) under run disk N, e.g.
+#   '[{"event":"read_aio","errno":5}]'  every read fails with EIO
+#   '[{"event":"write_aio","errno":5,"sector":2048}]'  writes covering sector 2048
+disk_errors() {
+	qmp "$1" "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"blkdebug\",\"node-name\":\"e$2\",\"image\":\"f$2\",\"inject-error\":$3}}" >/dev/null &&
+	    qmp "$1" "{\"execute\":\"blockdev-reopen\",\"arguments\":{\"options\":[{\"driver\":\"raw\",\"node-name\":\"r$2\",\"file\":\"e$2\"}]}}" >/dev/null
+}
+disk_clear_errors() {
+	qmp "$1" "{\"execute\":\"blockdev-reopen\",\"arguments\":{\"options\":[{\"driver\":\"raw\",\"node-name\":\"r$2\",\"file\":\"f$2\"}]}}" >/dev/null &&
+	    qmp "$1" "{\"execute\":\"blockdev-del\",\"arguments\":{\"node-name\":\"e$2\"}}" >/dev/null
+}
+# disk_throttle VM N IOPS [BPS]: limit run disk N (0 0 removes the limit)
+disk_throttle() {
+	qmp "$1" "{\"execute\":\"block_set_io_throttle\",\"arguments\":{\"id\":\"/machine/peripheral/rd$2/virtio-backend\",\"iops\":$3,\"iops_rd\":0,\"iops_wr\":0,\"bps\":${4:-0},\"bps_rd\":0,\"bps_wr\":0}}" >/dev/null
+}
+# host-side disk edits (pause the VM first for a consistent copy)
+disk_zero() { dd if=/dev/zero of="$1" bs=512 seek=$(($2 / 512)) count=$(($3 / 512)) conv=notrunc status=none; }
+disk_copy() { cp --sparse=always "$1" "$2" 2>/dev/null || cp "$1" "$2"; }
+# disk_swap VM N FILE: attach FILE as run disk N from VM's next boot on
+disk_swap() { sed -i "$(($2 + 1))s|.*|$3|" "$D/vm$1.disks"; }
+
+# ---- built-in triggers (a reproducer's host.sh can add or override them) --------
+# called as trigger_NAME VM ARGS...; ZR_REPLY is sent back to the guest
+trigger_pause() { vm_pause "$1"; sleep "${2:-2}"; vm_resume "$1"; }
+trigger_powercut() { vm_reboot "$1"; }	# never answers: the guest is gone
+trigger_unplug() { disk_unplug "$1" "$2"; }
+trigger_plug() { disk_plug "$1" "$2"; }
+trigger_errors() {	# errors N read|write|rw [SECTOR]
+	local ev rules= s=; [ -n "${4:-}" ] && s=",\"sector\":$4"
+	for ev in $(case $3 in read) echo read_aio ;; write) echo write_aio ;; *) echo read_aio write_aio ;; esac); do
+		rules="$rules${rules:+,}{\"event\":\"$ev\",\"errno\":5$s}"
+	done
+	disk_errors "$1" "$2" "[$rules]"
+}
+trigger_clear_errors() { disk_clear_errors "$1" "$2"; }
+trigger_throttle() { disk_throttle "$1" "$2" "$3" "${4:-0}"; }
+trigger_unthrottle() { disk_throttle "$1" "$2" 0 0; }
+trigger_zero() { disk_zero "$(disk_path "$1" "$2")" "$3" "$4"; }	# zero N OFFSET LENGTH (bytes)
+trigger_copy() { disk_copy "$(disk_path "$1" "$2")" "$RUN/$3"; ZR_REPLY="copied to $RUN/$3"; }
+trigger_type() { vm_type "$2" "$(printf '%b' "${*:3}")"; }	# type VM TEXT (\r for Enter)
+# wait_output VM ERE [SECONDS]: wait for ERE on VM's console
+wait_output() { local o=${WAIT_FROM:-0}; vm_wait "$2" "$3" "${4:-60}" "$o"; }
+trigger_sleep() { sleep "$2"; }
+
+# the zr channel of VM I: `ZR ID VERB ARGS...` from the guest, `ZR ID RC TEXT` back
+handler() {
+	local i=$1 line id verb name fn rc
+	exec 5<>"$D/vm$i.ctl.out" 6<>"$D/vm$i.ctl.in"
+	while IFS= read -r line <&5; do
+		line=${line//$'\r'/}
+		set -f; set -- $line; set +f
+		[ "${1:-}" = ZR ] && [ $# -ge 3 ] || continue
+		id=$2 verb=$3; shift 3
+		ZR_REPLY= rc=0
+		case $verb in
+		env) ZR_REPLY="VM=$i VMS=$VMS HOSTID=$(echo $HOSTIDS | cut -d' ' -f$((i + 1))) IP=$([ "$NETWORK" = 1 ] && echo "10.99.0.$((i + 1))") PEER=$([ "$NETWORK" = 1 ] && echo "10.99.0.$((2 - i))")" ;;
+		log) hlog "vm$i: $*" ;;
+		trigger | wait)
+			name=${1:-}; shift
+			fn=${verb}_${name//-/_}
+			if declare -F "$fn" >/dev/null; then
+				hlog "vm$i: $verb $name $*"
+				touch "$D/busy"
+				"$fn" "$i" "$@" >>"$HLOG" 2>&1; rc=$?
+				rm -f "$D/busy"
+				hlog "vm$i: $verb $name -> $rc${ZR_REPLY:+ ($ZR_REPLY)}"
+			else
+				rc=127 ZR_REPLY="no $verb '$name' on the host"; hlog "vm$i: $ZR_REPLY"
+			fi ;;
+		*) continue ;;
+		esac
+		printf 'ZR %s %s %s\n' "$id" "$rc" "$ZR_REPLY" >&6
+	done
+}
+
+start_all() {
+	local i
+	[ -f "$R/host.sh" ] && . "$R/host.sh"
+	for i in $(seq 0 $((VMS - 1))); do
+		vm_start "$i"
+		handler "$i" &
+		echo $! >>"$D/helpers"
+	done
+	# host_start: the reproducer's own setup once the VMs are booting (host.sh)
+	if declare -F host_start >/dev/null; then
+		(host_start >>"$HLOG" 2>&1) &
+		echo $! >>"$D/helpers"
+	fi
+}
+drain() {	# read VM I's console so it never blocks (the log has it all)
+	cat 0<>"$D/vm$1.s0.out" >/dev/null &
+	echo $! >>"$D/helpers"
+}
+stop_all() {
+	local i
+	for i in $(seq 0 $((VMS - 1))); do vm_alive "$i" && vm_kill "$i"; done
+	if [ -f "$D/helpers" ]; then
+		kill $(cat "$D/helpers") 2>/dev/null
+		wait $(cat "$D/helpers") 2>/dev/null
+		rm -f "$D/helpers"
+	fi
+}
+
+banner() {
+	say "== zfs-repro $ID, build '$LABEL'"
+	say "   $(rv TITLE)"
+	for n in $(rv PRS); do say "   PR:     https://github.com/openzfs/zfs/pull/$n"; done
+	say "   build:  $(rv "BUILD_${LABEL}_MARKER")"
+	say "   system: $(bv NAME) ($(bv OS) $(bv KERNEL)), $MEM MiB, $CPUS vCPUs, $DISKS x $(rv DISK_SIZE) run disk(s), $ACCEL"
+	[ "$VMS" -gt 1 ] && say "   $VMS VMs$([ "$SHARED" = 1 ] && echo ', sharing the run disks')$([ "$NETWORK" = 1 ] && echo ', linked by a private network')"
+	[ -f "$R/host.sh" ] && say "   host.sh: this reproducer acts on the VMs from outside (log: $HLOG)"
+	for _l in $LABELS; do
+		_m='  '; [ "$_l" = "$LABEL" ] && _m='->'
+		say "   $_m expect on '$_l': $(rv "EXPECT_$_l")"
+	done
+	if [ -n "$INSPECT" ]; then
+		say "   INSPECTING $INSPECT: the demo is not run; Up, Enter imports the pool and checks it"
+	else
+		say "   At the root prompt: Up, Enter runs the demo (its bash -x trace goes to the log below);"
+		say "   Up Up, Enter runs it without the trace.  less /demo/demo.sh shows the script."
+	fi
+	say "   Quit: poweroff (exports the pool, ends the VM), or Ctrl-] (stops the VMs at once)"
+	say "   kernel log + bash -x trace: $(log1 0)"
+	say
+}
+
+after() {
+	if [ -z "$INSPECT" ]; then
+		say "run disk(s), with the pool the demo left:"
+		sort -u "$D"/vm*.disks | sed 's/^/   /'
+		say "to inspect them later, mount a volume on /runs and run: IMAGE $LABEL --disk $(sort -u "$D"/vm*.disks | tr '\n' ' ')"
+	fi
+	say "logs: $RUN/*$LABEL-$TS.serial0.log (console), *.serial1.log (kernel log + trace)$([ -s "$HLOG" ] && echo ", $HLOG (host)")"
+	rm -f "$D"/vm*.overlay.qcow2
+}
+
+# attach I: this terminal <-> VM I's console; Ctrl-] leaves
+attach() {
+	local c
+	trap 'stty sane 2>/dev/null' EXIT
+	cat 0<>"$D/vm$1.s0.out" &
+	c=$!
+	# (a background job's stdin is /dev/null unless it is redirected)
+	exec 3<&0
+	socat -u STDIN,rawer,escape=0x1d "OPEN:$D/vm$1.s0.in" <&3 &
+	ATT=$!
+	# leave when the VM is gone for good (poweroff), not while it reboots
+	while kill -0 $ATT 2>/dev/null; do
+		if ! vm_alive "$1" && [ ! -f "$D/busy" ]; then
+			sleep 1; vm_alive "$1" || [ -f "$D/busy" ] || break
+		fi
+		sleep 0.3
+	done
+	kill $ATT $c 2>/dev/null; wait $ATT $c 2>/dev/null
+	stty sane 2>/dev/null
+}
+
+check() {	# boot, run the demo, wait for RESULT or a panic, power off, compare
+	local t0 i res exp pat='^panic: |Kernel panic - not syncing' l n
+	t0=$(date +%s)
+	trap 'stop_all' EXIT
+	trap 'exit 130' INT TERM
+	start_all
+	for i in $(seq 0 $((VMS - 1))); do drain "$i"; done
+	vm_wait 0 'press Up, Enter' 90 || { tail -30 "$(log0 0)" >&2; warn "no shell prompt after $((90 * TMULT)) s"; exit 1; }
+	say "prompt $(($(date +%s) - t0))s"
+	grep -a '^\*\*\* ' "$(log0 0)" | tr -d '\r'
+	sleep 1.5
+	vm_type 0 "$UP"
+	l=$(log0 "$RESULT_VM") n=$((TIMEOUT * 5 * TMULT))
+	while [ $n -gt 0 ]; do
+		grep -aEq "^RESULT |$pat" "$l" && break
+		for i in $(seq 0 $((VMS - 1))); do grep -aEq "$pat" "$(log0 "$i")" && break 2; done
+		if ! any_alive && [ ! -f "$D/busy" ]; then sleep 1; any_alive || [ -f "$D/busy" ] || break; fi
+		sleep 0.2; n=$((n - 1))
+	done
+	[ $n -gt 0 ] || warn "no RESULT within $((TIMEOUT * TMULT)) s"
+	if grep -aEq "$pat" "$RUN"/*"$LABEL-$TS".serial0.log; then
+		sleep 3
+		say "PANIC after $(($(date +%s) - t0))s (VMs killed)"
+		grep -ahE -m1 "$pat" "$RUN"/*"$LABEL-$TS".serial0.log | tr -d '\r' | sed 's/^/PANIC: /'
+	else
+		sleep 0.5
+		for i in $(seq $((VMS - 1)) -1 0); do vm_poweroff "$i"; done
+		say "RESULT $(($(date +%s) - t0))s, all off $(($(date +%s) - t0))s after start"
+	fi
+	stop_all; trap - EXIT
+	if [ -n "$VERBOSE" ]; then
+		for i in $(seq 0 $((VMS - 1))); do
+			say "---- vm$i serial0"; tr -d '\r' <"$(log0 "$i")"
+			say "---- vm$i serial1"; tr -d '\r' <"$(log1 "$i")"
+		done
+		[ -s "$HLOG" ] && { say "---- host"; cat "$HLOG"; }
+		say "----"
+	fi
+	res=$(grep -a '^RESULT ' "$l" | tr -d '\r' | tail -1)
+	say "${res:-no RESULT line}"
+	after
+	exp=$(rv "EXPECT_$LABEL")
+	[ -n "$INSPECT" ] && exp=$(rv "EXPECT_INSPECT_$LABEL")
+	[ -n "$exp" ] || { say "CHECK: no expected result for '$LABEL'"; exit 0; }
+	case $res in
+	"$exp"*) say "CHECK OK: matches the expected '$exp'"; exit 0 ;;
+	*) say "CHECK FAILED: expected '$exp'"; exit 1 ;;
+	esac
+}
+
+interactive() {	# plain: this terminal on VM0; console: tmux with every VM and log
+	local i S=zfs-repro p
+	trap 'stop_all' EXIT
+	start_all
+	if [ "$MODE" = plain ]; then
+		for i in $(seq 1 $((VMS - 1))); do drain "$i"; done
+		attach 0
+	else
+		export TERM=${TERM:-xterm-256color}
+		p=$(printf '%s ' "$SELF" --attach "$D")
+		tmux new-session -d -s "$S" -x "${COLUMNS:-240}" -y "${LINES:-60}" \
+		    "$p 0; tmux kill-session -t $S" || die "tmux failed"
+		tmux set-option -t "$S" mouse on >/dev/null
+		tmux set-option -t "$S" pane-border-status top >/dev/null
+		tmux select-pane -t "$S:0.0" -T "vm0 serial0: root shell ($LABEL build; Ctrl-] quits)"
+		for i in $(seq 1 $((VMS - 1))); do
+			tmux split-window -t "$S:0" "$p $i"
+			tmux select-pane -T "vm$i serial0: root shell"
+		done
+		for i in $(seq 0 $((VMS - 1))); do
+			tmux split-window -t "$S:0" "tail -n +1 -f $(log1 "$i")"
+			tmux select-pane -T "vm$i serial1: kernel log + bash -x trace"
+		done
+		if [ -f "$R/host.sh" ] || [ "$VMS" -gt 1 ]; then
+			tmux split-window -t "$S:0" "tail -n +1 -f $HLOG"
+			tmux select-pane -T "host: triggers and QMP"
+		fi
+		if [ "$VMS" = 1 ]; then
+			s=$R/demo.sh; [ -n "$INSPECT" ] && [ -f "$R/inspect.sh" ] && s=$R/inspect.sh
+			tmux split-window -t "$S:0" "less -N $s"
+			tmux select-pane -T "the script"
+			tmux select-layout -t "$S" even-horizontal >/dev/null
+		else
+			tmux select-layout -t "$S" tiled >/dev/null
+		fi
+		tmux select-pane -t "$S:0.0"
+		tmux attach -t "$S"
+	fi
+	stop_all; trap - EXIT
+	after
+}
+
+usage() {
+	cat <<'EOF'
+usage: IMAGE [LABEL] [--console | --check [--verbose]] [--dry-run]
+       IMAGE LABEL --disk /runs/FILE.raw... [--console | --check]
+       IMAGE --info | --sources | --clean | --help
+LABEL is a build of the reproducer (usually bug or fix; --info lists them).
+--console  tmux split: root shell(s) | kernel log + bash -x trace | host log | the script
+--check    boot, run the demo, wait for RESULT, power off; exit 0 if the RESULT
+           line is the expected one, 1 if not (--verbose prints the consoles)
+--disk     re-attach run disks of an earlier run (a volume on /runs) and inspect them
+--dry-run  print the qemu command line(s) instead of running them
+--sources  print the SOURCES of the base and the reproducer (also in /sources)
+--clean    delete the run disks and logs in /runs
+In the VM: Up, Enter runs the demo; poweroff ends it; Ctrl-] leaves at once.
+Run it with:  podman run --rm -it --device /dev/kvm IMAGE [LABEL]
+EOF
+	exit "${1:-2}"
+}
+
+main() {
+	MODE=plain INSPECT= LABEL= DRY=0 VERBOSE=
+	if [ "${1:-}" = --attach ]; then loadenv "$2"; attach "$3"; exit 0; fi
+	while [ $# -gt 0 ]; do
+		case $1 in
+		--console) MODE=console ;;
+		--check) MODE=check ;;
+		--verbose) VERBOSE=1 ;;
+		--dry-run) DRY=1 ;;
+		--info) info; exit 0 ;;
+		--sources) find /sources -type f | sort | while read -r f; do say "==> $f <=="; cat "$f"; say; done; exit 0 ;;
+		--clean) MODE=clean ;;
+		--disk)
+			shift
+			while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+				[ -f "$1" ] || die "no run disk $1 (mount the volume that holds it on /runs)"
+				INSPECT="$INSPECT $(cd "$(dirname "$1")" && pwd)/$(basename "$1")"; shift
+			done
+			INSPECT=${INSPECT# }
+			[ -n "$INSPECT" ] || die "--disk needs FILE..."
+			continue ;;
+		-h | --help) usage 0 ;;
+		-*) die "unknown option $1 (--help)" ;;
+		*) [ -z "$LABEL" ] || die "extra argument $1"; LABEL=$1 ;;
+		esac
+		shift
+	done
+	setup
+	if [ "$MODE" = clean ]; then
+		n=0
+		for f in "$RUN"/*.raw "$RUN"/*.log; do [ -e "$f" ] || continue; rm -f "$f"; n=$((n + 1)); done
+		rm -rf "$RUN"/.zr-*
+		say "removed $n file(s) from $RUN"; exit 0
+	fi
+	[ -n "$INSPECT" ] && VMS=1 SHARED=0 NETWORK=0
+	[ "$MODE" = check ] && [ -n "$INSPECT" ] && [ ! -f "$R/inspect.sh" ] && die "--check --disk needs an inspect script, which this reproducer lacks"
+	if [ "$MODE" != check ] && [ "$DRY" = 0 ] && [ ! -t 0 ]; then
+		die "no terminal for the VM's console: run with -it (podman run --rm -it ...), or use --check"
+	fi
+	# several VMs: the console view shows them all
+	[ "$MODE" = plain ] && [ "$VMS" -gt 1 ] && MODE=console
+	detect_accel
+	prepare
+	banner
+	if [ "$DRY" = 1 ]; then
+		for i in $(seq 0 $((VMS - 1))); do qemu_args "$i"; printf '+ '; qcmd "${A[@]}"; done
+		rm -rf "$D"; exit 0
+	fi
+	case $MODE in
+	check) check ;;
+	*) interactive ;;
+	esac
+}
+
+main "$@"
+exit
