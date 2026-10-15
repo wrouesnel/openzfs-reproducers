@@ -1,0 +1,12 @@
+#!/bin/bash
+# zpool -- bug #125 demo wrapper, first in PATH; runs the real zpool ($ZPOOL).
+# ZPOOL_MODE=slow:    `zpool add testpool2 ...` sleeps 4 s first: a slow runner
+# ZPOOL_MODE=blocked: `zpool add testpool2 ...` first runs `zpool list
+#                     testpool1`, which the kernel holds until testpool1's
+#                     import has finished loading: a command that really
+#                     waits for the import
+case ${ZPOOL_MODE:-}:${1:-}:${2:-} in
+slow:add:testpool2) sleep 4 ;;
+blocked:add:testpool2) "$ZPOOL" list testpool1 >/dev/null 2>&1 ;;
+esac
+exec "$ZPOOL" "$@"

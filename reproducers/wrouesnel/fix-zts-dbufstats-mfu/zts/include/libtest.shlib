@@ -1,0 +1,49 @@
+# libtest.shlib -- demo image stand-in for the ZTS library functions
+# dbufstats_002_pos.ksh uses (behaviour as in tests/zfs-tests/include/*.shlib;
+# log_fail runs the log_onexit cleanup and exits 1, log_pass exits 0).
+# dbufstat here is an awk filter over the dbufs kstat, not the Python
+# cmd/dbufstat, so it takes milliseconds instead of a Python start-up.
+UNAME=$(uname)
+_onexit=
+function _exit { typeset rc=$1; [[ -n $_onexit ]] && { typeset f=$_onexit; _onexit=; $f; }; exit $rc; }
+function log_note { echo "NOTE: $*"; }
+function log_assert { echo "ASSERTION: $*"; }
+function log_onexit { _onexit=$1; }
+function log_fail { echo "FAIL: $*"; _exit 1; }
+function log_pass { echo "PASS: $*"; _exit 0; }
+function log_must
+{
+	typeset out rc
+	out=$("$@" 2>&1); rc=$?
+	if ((rc != 0)); then
+		[[ -n $out ]] && echo "$out" | sed 's/^/    /'
+		log_fail "$* exited $rc"
+	fi
+	echo "SUCCESS: $*"
+}
+function verify_runnable { :; }
+function is_freebsd { [[ $UNAME == FreeBSD ]]; }
+function sync_all_pools { log_must zpool sync; return 0; }
+function get_objnum { stat -c %i "$1"; }
+function kstat { cat /proc/spl/kstat/zfs/$1; }
+function verify_eq	# A B NAME
+{
+	[[ $1 == $2 ]] || log_fail "Compared $3 should be equal: $1 != $2"
+}
+function verify_ne	# A B NAME
+{
+	[[ $1 != $2 ]] || log_fail "Compared $3 should be not equal: $1 == $2"
+}
+# dbufstat -bxn -i FILE -F "field=value,...": one line per matching dbuf
+function dbufstat
+{
+	typeset in= filt=
+	while (($# > 0)); do
+		case $1 in -i) in=$2; shift ;; -F) filt=$2; shift ;; esac
+		shift
+	done
+	awk -v filt="$filt" '
+		BEGIN { n = split(filt, f, ","); for (i = 1; i <= n; i++) { split(f[i], kv, "="); want[kv[1]] = kv[2] } }
+		!hdr && / object / && / list / { for (i = 1; i <= NF; i++) col[$i] = i; hdr = 1; next }
+		hdr { ok = 1; for (k in want) if ($(col[k]) != want[k]) ok = 0; if (ok) print }' "$in"
+}

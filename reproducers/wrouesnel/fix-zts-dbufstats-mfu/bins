@@ -1,0 +1,3 @@
+# ksh93 from the userland builder (Ubuntu 24.04 ksh); file_write comes with
+# the OpenZFS build (TOOLS in reproducer.conf)
+ksh=ksh93

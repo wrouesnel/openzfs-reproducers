@@ -1,0 +1,45 @@
+# libtest.shlib -- demo image stand-in for the few ZTS library functions the
+# demo's test uses (same behaviour as tests/zfs-tests/include/{libtest,
+# logapi}.shlib for these: log_fail runs the log_onexit cleanup and exits 1,
+# log_pass exits 0, log_unsupported 4).
+UNAME=$(uname)
+_onexit=
+function _exit { typeset rc=$1; [[ -n $_onexit ]] && { typeset f=$_onexit; _onexit=; $f; }; exit $rc; }
+function log_note { echo "NOTE: $*"; }
+function log_assert { echo "ASSERTION: $*"; }
+function log_onexit { _onexit=$1; }
+function log_fail { echo "FAIL: $*"; _exit 1; }
+function log_pass { echo "PASS: $*"; _exit 0; }
+function log_unsupported { echo "UNSUPPORTED: $*"; _exit 4; }
+function log_must
+{
+	typeset out rc
+	out=$("$@" 2>&1); rc=$?
+	if ((rc != 0)); then
+		[[ -n $out ]] && echo "$out" | sed 's/^/    /'
+		log_fail "$* exited $rc"
+	fi
+	echo "SUCCESS: $*"
+}
+function log_mustnot
+{
+	typeset out rc
+	out=$("$@" 2>&1); rc=$?
+	if ((rc == 0)); then log_fail "$* unexpectedly exited 0"; fi
+	echo "SUCCESS: $* exited $rc (expected to fail)"
+}
+function verify_runnable { :; }
+function is_global_zone { true; }
+function is_linux { [[ $UNAME == Linux ]]; }
+function get_prop { zfs get -Hpo value "$1" "$2" || log_fail "zfs get $1 $2"; }
+function sync_pool
+{
+	if [[ ${2:-false} == true ]]; then log_must zpool sync -f ${1:-$TESTPOOL}
+	else log_must zpool sync ${1:-$TESTPOOL}; fi
+	return 0
+}
+function sync_all_pools
+{
+	if [[ ${1:-false} == true ]]; then log_must zpool sync -f; else log_must zpool sync; fi
+	return 0
+}

@@ -1,0 +1,37 @@
+# libtest.shlib -- bug #120 demo image: the few ZTS library functions
+# crtime_001_pos.ksh uses, in the same form as
+# tests/zfs-tests/include/libtest.shlib (log_* print and exit like the real
+# ones: log_fail exits 1, log_pass 0, log_unsupported 4).
+UNAME=$(uname)
+function log_note { echo "NOTE: $*"; }
+function log_assert { echo "ASSERTION: $*"; }
+function log_fail { echo "FAIL: $*"; exit 1; }
+function log_pass { echo "PASS: $*"; exit 0; }
+function log_unsupported { echo "UNSUPPORTED: $*"; exit 4; }
+function log_must
+{
+	"$@" || log_fail "$* exited $?"
+	echo "SUCCESS: $*"
+}
+function verify_runnable { :; }
+function is_linux { [[ $UNAME == Linux ]]; }
+function linux_version	# [VERSION]: as an integer, like the real one
+{
+	typeset v=${1:-$(uname -r)}
+	v=${v%%-*}
+	typeset IFS=.
+	set -- $v
+	echo $(( ${1:-0} * 10000 + ${2:-0} * 100 + ${3:-0} ))
+}
+function compare_version_gte	# A B: A >= B
+{
+	[[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | tail -1)" == "$1" ]]
+}
+function stat_ctime
+{
+	case $UNAME in FreeBSD) stat -f %c "$1" ;; *) stat -c %Z "$1" ;; esac
+}
+function stat_crtime
+{
+	case $UNAME in FreeBSD) stat -f %B "$1" ;; *) stat -c %W "$1" ;; esac
+}

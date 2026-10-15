@@ -1,0 +1,21 @@
+# libtest.shlib -- bug #125 demo image: the few ZTS library functions
+# zpool_import_parallel_admin.ksh uses, in the same form as
+# tests/zfs-tests/include/libtest.shlib and kstat.shlib (log_fail exits 1,
+# log_pass 0; log_onexit's function runs at exit).
+function log_note { echo "NOTE: $*"; }
+function log_assert { echo "ASSERTION: $*"; }
+function log_onexit { trap "$*" EXIT; }
+function log_fail { echo "FAIL: $*"; exit 1; }
+function log_pass { echo "PASS: $*"; exit 0; }
+function log_must
+{
+	"$@" || log_fail "$* exited $?"
+	echo "SUCCESS: $*"
+}
+function verify_runnable { :; }
+function destroy_pool
+{
+	zpool list -H "$1" >/dev/null 2>&1 && zpool destroy -f "$1"
+	return 0
+}
+function kstat { cat /proc/spl/kstat/zfs/$1; }
