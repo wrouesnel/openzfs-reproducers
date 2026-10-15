@@ -16,7 +16,8 @@
 #   builder/build.sh zfs-user USERLAND REPO@SHA [CONFIGURE...]   OpenZFS tools
 #   builder/build.sh zfs-kmod TARGET REPO@SHA [CONFIGURE...]     OpenZFS modules
 #   builder/build.sh zfs-for ID TARGET...     the OpenZFS halves ID needs
-#   builder/build.sh demo ID                  the demo disk (work/demos/ID)
+#   builder/build.sh demo ID [TARGET]         the demo disk (work/demos/ID; another
+#                                             architecture's: work/demos-ARCH/ID)
 #   builder/build.sh disks ID TARGET...       the build disks
 #   builder/build.sh images ID TARGET...      runtime, userland, kernel, demo, build layers
 #   builder/build.sh check ID TARGET [LABEL...]   podman run IMAGE --check (+ --disk)
@@ -64,9 +65,16 @@ linux_targets() { local t; for t in $(all_targets); do [ "$(tconf "$t" OS)" = Li
 targets_of() {	# the targets a reproducer is built for
 	local t ts skip; ts=$(rconf "$1" TARGETS); skip=" $(rconf "$1" SKIP_TARGETS) "
 	[ -n "$ts" ] || ts=$(linux_targets)
+	# EXTRA_TARGETS: more, for example the big-endian ubuntu24-s390x (TCG only)
+	ts="$ts $(rconf "$1" EXTRA_TARGETS)"
 	# LOCAL_TARGETS: built outside CI (FreeBSD: scripts/freebsd-image.sh)
 	ts="$ts $(rconf "$1" LOCAL_TARGETS)"
-	for t in $ts; do case $skip in *" $t "*) ;; *) echo "$t" ;; esac; done
+	for t in $ts; do
+		case $skip in *" $t "*) continue ;; esac
+		# ONLY_TARGETS (space separated): a narrowed run (CI's workflow_dispatch)
+		[ -z "${ONLY_TARGETS:-}" ] || case " $ONLY_TARGETS " in *" $t "*) ;; *) continue ;; esac
+		echo "$t"
+	done
 }
 labels() { local l; for l in repro fixed; do [ -n "$(rconf "$1" "BUILD_$l")" ] && echo "$l"; done; }
 userland_of() { tconf "$1" USERLAND; }
@@ -88,6 +96,13 @@ tag_of() {
 }
 img_of() { echo "$IMAGE:$(tag_of "$@")"; }
 tag_runtime() { echo "$IMAGE:runtime-$(hashof runtime/Containerfile runtime/prune.sh runtime/zfs-repro-vm | cut -c1-12)"; }
+# the runtime of userland U: x86_64 uses the runtime; another architecture
+# gets an optional layer with its qemu (runtime/Containerfile.ARCH) on top
+tag_uruntime() {
+	local a; a=$(uarch "$1")
+	if [ "$a" = x86_64 ]; then tag_runtime
+	else echo "$IMAGE:runtime-$a-$(hashof runtime/Containerfile runtime/prune.sh runtime/zfs-repro-vm "runtime/Containerfile.$a" | cut -c1-12)"; fi
+}
 tag_userland() { echo "$IMAGE:userland-$1-$(cat "$WORK/userlands/$1/hash")"; }
 tag_kernel() { echo "$IMAGE:kernel-$1-$(kver "$1")"; }
 tag_demo() { echo "localhost/zfs-repro-demo:$(idtag "$1")-$2"; }
@@ -129,9 +144,11 @@ inb() {	# inb T|u-U CMD...: run CMD in that builder container
 	u-*) a=$(uconf "${b#u-}" ARCH) s=$(uconf "${b#u-}" SNAPSHOT) ;;
 	*) a=$(tarch "$b") k=$(tconf "$b" KERNEL) s=$(tconf "$b" SNAPSHOT) d=$(tconf "$b" DISTRO) ;;
 	esac
+	# no ARCH for another architecture: kbuild reads ARCH (s390x is "s390"
+	# there), and the builder's uname -m is the guest's anyway
 	$PODMAN run --rm --platform "$(plat "${a:-x86_64}")" --network=host -v "$T:/src:ro" -v "$WORK:/work" \
 	    -e KERNEL="$k" -e SOURCE_DATE_EPOCH=0 -e MAKEJOBS="${MAKEJOBS:-}" -e EXTRA="${EXTRA:-}" \
-	    -e ARCH="${a:-x86_64}" -e DISTRO="$d" -e SNAPSHOT="$s" \
+	    $([ "${a:-x86_64}" = x86_64 ] && printf '%s ' -e ARCH=x86_64) -e DISTRO="$d" -e SNAPSHOT="$s" \
 	    "$(builder_img "$b")" "$@"
 }
 
@@ -168,10 +185,14 @@ cmd_zfs() {	# user|kmod U|T REPO@SHA CONFIGURE...
 	local m=$1 b=$2 rs=$3 d; shift 3
 	d=$(zdir "$m" "$b" "$rs" "$@")
 	[ -f "$d/pkg/build.txt" ] && { echo "cached: ${d#"$WORK"/}"; return; }
-	case $m in
-	user) inb "u-$b" bash /src/builder/in/zfs.sh user "${rs%@*}" "${rs##*@}" "/work/${d#"$WORK"/}" "$@" ;;
-	kmod) inb "$b" bash /src/builder/in/zfs.sh kmod "${rs%@*}" "${rs##*@}" "/work/${d#"$WORK"/}" "$@" ;;
-	esac
+	local bb=$b a; [ "$m" = user ] && bb=u-$b
+	case $m in user) a=$(uarch "$b") ;; *) a=$(tarch "$b") ;; esac
+	# under qemu-user (another architecture) a configure test or a compile
+	# fails now and then for no reason of its own: one more try
+	inb "$bb" bash /src/builder/in/zfs.sh "$m" "${rs%@*}" "${rs##*@}" "/work/${d#"$WORK"/}" "$@" && return 0
+	[ "$a" != x86_64 ] || return 1
+	echo "zfs-$m $b ${rs##*@}: failed under emulation ($a); trying once more" >&2
+	inb "$bb" bash /src/builder/in/zfs.sh "$m" "${rs%@*}" "${rs##*@}" "/work/${d#"$WORK"/}" "$@"
 }
 rextra() { rconf "$1" TOOLS; }
 cmd_zfs_for() {	# ID TARGET...: both halves of each build
@@ -187,10 +208,15 @@ cmd_zfs_for() {	# ID TARGET...: both halves of each build
 		done
 	done
 }
-cmd_demo() {
-	local id=$1 u; u=${2:-$(userland_of "$(targets_of "$id" | head -1)")}
+uarch() { local a; a=$(uconf "$1" ARCH); echo "${a:-x86_64}"; }
+# the demo disk of ID for userland U: its helpers are compiled for U's architecture
+demodir() { if [ "$(uarch "$2")" = x86_64 ]; then echo "$WORK/demos/$1"; else echo "$WORK/demos-$(uarch "$2")/$1"; fi; }
+cmd_demo() {	# ID [TARGET|USERLAND]
+	local id=$1 u d
+	if [ -n "${2:-}" ] && [ -f "$T/bases/$2/base.conf" ]; then u=$(userland_of "$2"); else u=${2:-$(userland_of "$(targets_of "$id" | head -1)")}; fi
+	d=$(demodir "$id" "$u")
 	[ -f "$WORK/userlands/$u/files" ] || cmd_userland "$u"
-	inb "u-$u" bash /src/builder/in/demo-disk.sh "$id" "/src/reproducers/$id" "/work/userlands/$u" "/work/demos/$id"
+	inb "u-$u" bash /src/builder/in/demo-disk.sh "$id" "/src/reproducers/$id" "/work/userlands/$u" "/work/${d#"$WORK"/}"
 }
 cmd_disks() {	# ID TARGET...: each label's build disk for each target
 	local id=$1 t l u du dk o d; shift
@@ -257,7 +283,13 @@ cmd_images() {	# ID TARGET...
 		rm -rf "$ctx/u"; mkdir -p "$ctx/u/base"
 		cp -p "$WORK/userlands/$u/base.qcow2" "$ctx/u/base/"; cp -p "$WORK/userlands/$u/SOURCES.txt" "$ctx/u/"
 		chmod 644 "$ctx/u/base/base.qcow2"
-		$PODMAN build -q --timestamp 0 -t "$(tag_userland "$u")" --build-arg FROM="$(tag_runtime)" \
+		if [ "$(tag_uruntime "$u")" != "$(tag_runtime)" ]; then
+			$PODMAN image exists "$(tag_uruntime "$u")" ||
+			    $PODMAN build -q -t "$(tag_uruntime "$u")" --build-arg RUNTIME="$(tag_runtime)" \
+			        -f "$T/runtime/Containerfile.$(uarch "$u")" "$T/runtime" >/dev/null
+			echo "image $(tag_uruntime "$u")"
+		fi
+		$PODMAN build -q --timestamp 0 -t "$(tag_userland "$u")" --build-arg FROM="$(tag_uruntime "$u")" \
 		    --label org.opencontainers.image.source="$SRCURL" \
 		    --label org.opencontainers.image.description="zfs-repro userland $u (no kernel, no reproducer)" \
 		    -f "$T/builder/Containerfile.userland" "$ctx/u" >/dev/null
@@ -276,7 +308,7 @@ cmd_images() {	# ID TARGET...
 		echo "image $(tag_kernel "$t")"
 		# demo: the same layer content for every target and build
 		rm -rf "$ctx/d"; mkdir -p "$ctx/d/repro" "$ctx/d/sources"
-		D=$WORK/demos/$id
+		D=$(demodir "$id" "$u")
 		cp -p "$D/repro.conf" "$D/demo.sh" "$ctx/d/repro/"
 		for f in demo.qcow2 inspect.sh host.sh; do [ -f "$D/$f" ] && cp -p "$D/$f" "$ctx/d/repro/"; done
 		cp -p "$D/SOURCES.txt" "$ctx/d/sources/"
@@ -369,19 +401,19 @@ cmd_plan() {	# JSON for the CI matrix, with every cache key and work dir
 			for t in $(targets_of "$id"); do
 				[ "$(tconf "$t" OS)" = Linux ] || continue
 				u=$(userland_of "$t")
-				printf 'J\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$t" "$u" "$(cmd_key builder "$t")" "$(cmd_key kernel "$t")" "$(cmd_key builder "u-$u")"
+				printf 'J\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$t" "$u" "$(cmd_key builder "$t")" "$(cmd_key kernel "$t")" "$(cmd_key builder "u-$u")" "$(cmd_key userland "$u")" "$(tarch "$t")"
 				for l in repro fixed; do
 					rs=$(rconf "$id" "BUILD_$l")
 					if [ -n "$rs" ]; then
 						# shellcheck disable=SC2086
 						printf '\t%s\t%s\t%s\t%s' "$(cmd_key zfs-user "$u" "$rs" $cfg)" "$(zdir user "$u" "$rs" $cfg | sed "s|^$WORK/||")" \
 						    "$(cmd_key zfs-kmod "$t" "$rs" $cfg)" "$(zdir kmod "$t" "$rs" $cfg | sed "s|^$WORK/||")"
-						printf 'Z\t%s\t%s\t%s\t%s\t%s\t%s\n' "$u" "$rs" "$cfg" "$EXTRA" "$(cmd_key zfs-user "$u" "$rs" $cfg)" "$(zdir user "$u" "$rs" $cfg | sed "s|^$WORK/||")" >>"$WORK/.plan-z"
+						printf 'Z\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$u" "$rs" "$cfg" "$EXTRA" "$(cmd_key zfs-user "$u" "$rs" $cfg)" "$(zdir user "$u" "$rs" $cfg | sed "s|^$WORK/||")" "$(cmd_key builder "u-$u")" "$(uarch "$u")" >>"$WORK/.plan-z"
 					else printf '\t\t\t\t'; fi
 				done
 				printf '\n'
-				printf 'T\t%s\t%s\t%s\t%s\n' "$t" "$u" "$(cmd_key builder "$t")" "$(cmd_key kernel "$t")"
-				printf 'U\t%s\t%s\t%s\n' "$u" "$(cmd_key builder "u-$u")" "$(cmd_key userland "$u")"
+				printf 'T\t%s\t%s\t%s\t%s\t%s\t%s\n' "$t" "$u" "$(cmd_key builder "$t")" "$(cmd_key kernel "$t")" "$(cmd_key userland "$u")" "$(tarch "$t")"
+				printf 'U\t%s\t%s\t%s\t%s\n' "$u" "$(cmd_key builder "u-$u")" "$(cmd_key userland "$u")" "$(uarch "$u")"
 			done
 		done
 		cat "$WORK/.plan-z" 2>/dev/null; rm -f "$WORK/.plan-z"
@@ -392,14 +424,15 @@ for line in sys.stdin:
     f = line.rstrip("\n").split("\t")
     if f[0] == "J":
         j = {"id": f[1], "target": f[2], "userland": f[3], "builder_key": f[4], "kernel_key": f[5], "ubuilder_key": f[6],
-             "name": f[1].replace("/", "-") + "-" + f[2]}
+             "userland_key": f[7], "arch": f[8], "name": f[1].replace("/", "-") + "-" + f[2]}
         for i, l in enumerate(("repro", "fixed")):
-            k = f[7 + 4 * i: 11 + 4 * i]
+            k = f[9 + 4 * i: 13 + 4 * i]
             j[l] = {"user_key": k[0], "user_dir": k[1], "kmod_key": k[2], "kmod_dir": k[3]} if k and k[0] else None
         jobs.append(j)
-    elif f[0] == "T": targets[f[1]] = {"target": f[1], "userland": f[2], "builder_key": f[3], "kernel_key": f[4]}
-    elif f[0] == "U": users[f[1]] = {"userland": f[1], "builder_key": f[2], "userland_key": f[3]}
-    else: zfs[f[5]] = {"userland": f[1], "build": f[2], "configure": f[3], "extra": f[4], "key": f[5], "dir": f[6], "name": f[2].split("@")[1][:12]}
+    elif f[0] == "T": targets[f[1]] = {"target": f[1], "userland": f[2], "builder_key": f[3], "kernel_key": f[4], "userland_key": f[5], "arch": f[6]}
+    elif f[0] == "U": users[f[1]] = {"userland": f[1], "builder_key": f[2], "userland_key": f[3], "arch": f[4]}
+    else: zfs[f[5]] = {"userland": f[1], "build": f[2], "configure": f[3], "extra": f[4], "key": f[5], "dir": f[6], "ubuilder_key": f[7], "arch": f[8],
+                       "name": f[2].split("@")[1][:12] + ("" if f[8] == "x86_64" else "-" + f[8])}
 print(json.dumps({"jobs": jobs, "targets": list(targets.values()), "userlands": list(users.values()), "zfs": list(zfs.values())}))'
 }
 cmd_key() {	# cache keys: what each output depends on
@@ -460,7 +493,7 @@ all)
 	ts=("$@"); [ ${#ts[@]} -gt 0 ] || read -ra ts <<<"$(targets_of "$id" | tr '\n' ' ')"
 	for t in "${ts[@]}"; do cmd_userland "$(userland_of "$t")"; cmd_kernel "$t"; done
 	cmd_zfs_for "$id" "${ts[@]}"
-	cmd_demo "$id"
+	for t in "${ts[@]}"; do cmd_demo "$id" "$t"; done
 	cmd_disks "$id" "${ts[@]}"
 	cmd_images "$id" "${ts[@]}"
 	rc=0; for t in "${ts[@]}"; do cmd_check "$id" "$t" || rc=1; done; exit $rc ;;

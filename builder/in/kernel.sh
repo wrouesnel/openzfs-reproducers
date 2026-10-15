@@ -79,11 +79,16 @@ q() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 	echo "NAME=$(q "$NAME")"
 	echo "TARGET=$(q "$NAME")"
 	echo "OS=Linux"
-	echo "ARCH=$(q "${ARCH:-x86_64}")"
+	echo "ARCH=$(q "${ARCH:-$(uname -m)}")"
 	echo "KERNEL=$(q "$K")"
 	echo "DISTRO=$(q "${DISTRO:-}")"
 	echo "BOOT=kernel"
-	echo "CMDLINE='console=ttyS0,115200 loglevel=4 panic=0 root=/dev/vda rw rootfstype=ext4 init=/sbin/init'"
+	# the userland's root (s390x: a GPT partition by PARTUUID) and console
+	root=$(sed -n "s/^ROOT='\{0,1\}\([^']*\)'\{0,1\}$/\1/p" "$(dirname "$BB")/userland.conf" 2>/dev/null)
+	case ${ARCH:-$(uname -m)} in
+	s390x) echo "CMDLINE='console=ttysclp0 rootwait loglevel=4 panic=0 root=${root:-/dev/vda} rw rootfstype=ext4 init=/sbin/init'" ;;
+	*) echo "CMDLINE='console=ttyS0,115200 loglevel=4 panic=0 root=${root:-/dev/vda} rw rootfstype=ext4 init=/sbin/init'" ;;
+	esac
 	echo "RUN_DISK=gpt-zfs"
 	echo "INITRD=$INITRD"
 } >"$O/base.conf"

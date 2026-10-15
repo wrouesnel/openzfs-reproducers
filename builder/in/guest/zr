@@ -1,8 +1,8 @@
 #!/bin/bash
 # zr: the guest side of the zfs-repro host channel (installed as /demo/bin/zr).
-# A line protocol on the VM's third serial port (Linux /dev/ttyS2): the guest
-# sends `ZR ID VERB ARGS...`, the container's orchestrator answers
-# `ZR ID RC TEXT` once it is done.  Every call blocks until the answer.
+# A line protocol on the VM's third serial port (Linux /dev/ttyS2; on s390x
+# the virtio console /dev/hvc1): the guest sends `ZR ID VERB ARGS...`, the
+# container's orchestrator answers `ZR ID RC TEXT` once it is done.  Every call blocks until the answer.
 #   zr trigger NAME [ARGS]  ask the host to act (pause, powercut, unplug N, plug N,
 #                           errors N read|write|rw [SECTOR], clear-errors N,
 #                           throttle N IOPS [BPS], unthrottle N, zero N OFF LEN,
@@ -17,6 +17,8 @@
 # Exit status: the host's (0 = done; 127 = the host has no such trigger).
 set -u
 dev=/dev/ttyS2; [ "$(uname -s)" = FreeBSD ] && dev=/dev/cuau2
+# a userland whose zr channel is elsewhere names it (s390x: the virtio console hvc1)
+z=$(sed -n 's/^ZR_DEV=//p' /etc/demo-base.conf 2>/dev/null); [ -n "$z" ] && dev=$z
 req() {
 	local id=$$$RANDOM line rc
 	exec 3<>"$dev" || { echo "zr: no host channel $dev" >&2; exit 2; }

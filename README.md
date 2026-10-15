@@ -140,6 +140,7 @@ the kernel each one ran on 2026-10-15 (read from the CI job logs):
 | `freebsd15-1r` | 15.1-RELEASE | FreeBSD CI image (built locally) |
 | `freebsd15-1s` | 15.1-STABLE | FreeBSD CI snapshot (built locally) |
 | `freebsd16-0c` | 16.0-CURRENT | FreeBSD CI snapshot (built locally) |
+| `ubuntu24-s390x` | 6.8.0-142-generic (s390x, **big endian**, TCG only) | Ubuntu snapshot 20261015 (ports) |
 
 Each Linux target is its distribution's own kernel package, unmodified, and
 the OpenZFS modules for it are built in a container of that distribution, with
@@ -147,6 +148,31 @@ its compiler and kernel headers, as CI does in its VMs. All Linux targets boot
 the same small userland (Ubuntu 24.04's busybox, bash and libraries), so the
 OpenZFS tools are built once per commit. [docs/targets.md](docs/targets.md)
 has the details and how to move a target to a newer kernel.
+
+### Big endian (s390x)
+
+openzfs/zfs CI has no big-endian target, but OpenZFS keeps most on-disk
+structures in the byte order of the host that wrote them, so some bugs only
+show there. `ubuntu24-s390x` is Ubuntu 24.04's kernel for IBM Z (the same
+version as `ubuntu24`) with an s390x build of the same userland, in
+`qemu-system-s390x`:
+
+```sh
+podman run --rm -it ghcr.io/wrouesnel/openzfs-reproducers:repro-wrouesnel-fix-mmap-eof-extend-ubuntu24-s390x-6.8.0-142-generic
+```
+
+- It runs **only under software emulation** (TCG): KVM can't run an s390x
+  guest on an x86_64 host, so it needs no `--device /dev/kvm`. On a 32-thread
+  host the VM reaches its prompt in about 6 seconds and the mmap demo
+  finishes in under 20; the timeouts are 20 times the reproducer's, for
+  slower hosts. `--parallel` is best left at 1 or 2.
+- The console is the SCLP console (the same Up, Enter, Ctrl-] and
+  `--console`); the kernel log and the trigger channel are virtio consoles and
+  the disks are virtio-ccw. Every `zr` trigger works (selftest-triggers passes).
+- qemu-system-s390x is in its own layer (about 12 MB) under the s390x
+  userland, so the x86_64 images don't carry it.
+- A reproducer opts in with `EXTRA_TARGETS='ubuntu24-s390x'`, and its images
+  are published only where the break reproduces on big endian too.
 
 ## Tags
 

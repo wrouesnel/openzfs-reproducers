@@ -5,19 +5,29 @@
 # terminfo, the shared libraries the OpenZFS tools need).  No kernel and no
 # ZFS: every Linux target (a kernel, kernel.sh) boots this same root, so the
 # image layer that holds it is shared by every target.  Writes to OUTDIR:
-#   base.qcow2     compressed qcow2 of the ext4 root (booted with root=/dev/vda)
+#   base.qcow2     compressed qcow2 of the ext4 root (booted with root=/dev/vda;
+#                  s390x: a GPT whose partition is the root, root=PARTUUID=...)
 #   busybox        the static busybox, for the targets' initramfs (kernel.sh)
 #   files          every path in the root (reproducer disks leave these out)
-#   userland.conf  NAME DISTRO ZLIB SNAPSHOT
+#   userland.conf  NAME DISTRO ZLIB ARCH ROOT SNAPSHOT
 #   SOURCES.txt    the packages every file came from, with their sources
 # busybox init runs /etc/rcS: API filesystems and tmpfs, then
 # /etc/demo-common.sh finds the demo disk and the build disk by their
 # serials, mounts them on /demo and /zfs, insmods the build's spl.ko and
 # zfs.ko and links its tools; `dmesg -w` goes to ttyS1 and a root bash runs
-# on ttyS0.
+# on ttyS0.  An s390x userland (built under qemu-user) uses the SCLP console
+# ttysclp0 instead, and the virtio consoles hvc0 (kernel log) and hvc1 (the
+# zr channel), which runtime/zfs-repro-vm attaches for s390x targets; its
+# root is a GPT partition (kernel.sh boots it by PARTUUID).
 set -euo pipefail
 NAME=${1:?name} O=${2:?outdir}
 IN=$(cd "$(dirname "$0")" && pwd)
+ARCH=$(uname -m)
+case $ARCH in
+x86_64) CON=ttyS0 SER1=/dev/ttyS1 ZRDEV=/dev/ttyS2 LDTAG=x86-64 ;;
+s390x) CON=ttysclp0 SER1=/dev/hvc0 ZRDEV=/dev/hvc1 LDTAG=64bit ;;
+*) echo "userland.sh: no support for $ARCH" >&2; exit 1 ;;
+esac
 W=$(mktemp -d /tmp/base.XXXXXX) P=$W/root
 mkdir -p "$O" "$P"
 mkdir -p "$P"/{usr/bin,usr/sbin,usr/lib,usr/lib64,proc,sys,dev,tmp,var/tmp,run,root,etc/zfs,demo,zfs,mnt}
@@ -54,7 +64,7 @@ zlibs="libblkid.so.1 libuuid.so.1 libudev.so.1 libz.so.1 libcrypto.so.3 libssl.s
 		ldd "$f" 2>/dev/null | grep -o '/[^ ]*' || true
 	done
 	for l in $zlibs; do
-		r=$(ldconfig -p | awk -v l="$l" '$1 == l && /x86-64/ { print $NF; exit }')
+		r=$(ldconfig -p | awk -v l="$l" -v t=",$LDTAG" '$1 == l && index($0, t) { print $NF; exit }')
 		[ -n "$r" ] || { echo "no $l in the builder" >&2; exit 1; }
 		echo "$r"; ldd "$r" 2>/dev/null | grep -o '/[^ ]*' || true
 	done
@@ -81,9 +91,9 @@ printf 'root:x:0:0:root:/root:/bin/bash\n' >"$P/etc/passwd"
 printf 'root:x:0:\n' >"$P/etc/group"
 ln -s /proc/self/mounts "$P/etc/mtab"
 cp "$IN/demo-common.sh" "$P/etc/demo-common.sh"
-cat >"$P/etc/inittab" <<'EOF'
+cat >"$P/etc/inittab" <<EOF
 ::sysinit:/etc/rcS
-ttyS0::respawn:/etc/shell
+$CON::respawn:/etc/shell
 ::ctrlaltdel:/sbin/poweroff
 ::shutdown:/bin/sync
 EOF
@@ -125,6 +135,8 @@ stty -F /dev/ttyS1 115200 onlcr 2>/dev/null
 # full path: busybox ash prefers its own applets, and its dmesg has no -w
 /usr/bin/dmesg -w >/dev/ttyS1 2>&1 &
 EOF
+# s390x: the kernel log goes to $SER1 (hvc0, from /etc/demo-base.conf)
+[ "$SER1" = /dev/ttyS1 ] || sed -i 's|^\(stty -F \)/dev/ttyS1|\1$SER1|; s|^\(/usr/bin/dmesg -w >\)/dev/ttyS1|\1$SER1|' "$P/etc/rcS"
 chmod 755 "$P/etc/rcS"
 printf '#!/bin/sh\ncd /root\nexport HOME=/root\nexec /bin/bash -l\n' >"$P/etc/shell"
 chmod 755 "$P/etc/shell"
@@ -140,6 +152,8 @@ EOF
 ZLIB=/usr/lib
 case $(readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null) in */lib64/*) ZLIB=/usr/lib64 ;; esac
 echo "ZLIB=$ZLIB" >"$P/etc/demo-base.conf"
+# the second serial port and the zr channel, where they aren't ttyS1/ttyS2
+[ "$SER1" = /dev/ttyS1 ] || printf 'SER1=%s\nZR_DEV=%s\n' "$SER1" "$ZRDEV" >>"$P/etc/demo-base.conf"
 
 # ---- image ------------------------------------------------------------------
 cp -L "$BB" "$O/busybox"
@@ -150,6 +164,18 @@ kb=$(du -sk --apparent-size "$P" | cut -f1)
 echo "userland tree: ${kb} KiB"
 truncate -s $(( (kb * 15 / 10 + 32768) * 1024 )) "$W/base.ext4"
 mkfs.ext4 -q -F -L zfsdemo -m 0 -N 4096 -O ^has_journal -U clear -E root_owner=0:0,hash_seed=00000000-0000-0000-0000-000000000000 -d "$P" "$W/base.ext4"
+ROOT=/dev/vda
+if [ "$ARCH" = s390x ]; then
+	# virtio-ccw disks are probed in parallel, so the root disk isn't always
+	# vda: the root is a GPT partition with a fixed PARTUUID (kernel.sh)
+	ROOT=PARTUUID=5a465352-6f6f-7400-0000-000000000001
+	sz=$(stat -c %s "$W/base.ext4")
+	truncate -s $((sz + 2 * 1048576)) "$W/base.disk"
+	printf 'label: gpt\nlabel-id: 5a465352-6f6f-7400-0000-000000000000\nstart=2048, size=%d, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=%s\n' \
+	    $((sz / 512)) "${ROOT#PARTUUID=}" | sfdisk -q "$W/base.disk" >/dev/null
+	dd if="$W/base.ext4" of="$W/base.disk" bs=1M seek=1 conv=notrunc status=none
+	mv "$W/base.disk" "$W/base.ext4"
+fi
 qemu-img convert -q -c -o compression_type=zlib -f raw -O qcow2 "$W/base.ext4" "$O/base.qcow2"
 (cd "$P" && find . | sed 's/^\.//' | sort) >"$O/files"
 q() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
@@ -157,6 +183,8 @@ q() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 	echo "NAME=$(q "$NAME")"
 	echo "DISTRO=$(q "$(. /etc/os-release; echo "$PRETTY_NAME")")"
 	echo "ZLIB=$(q "$ZLIB")"
+	echo "ARCH=$(q "$ARCH")"
+	echo "ROOT=$(q "$ROOT")"
 	echo "SNAPSHOT=$(q "${SNAPSHOT:-}")"
 } >"$O/userland.conf"
 

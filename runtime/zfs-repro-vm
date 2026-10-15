@@ -1,7 +1,8 @@
 #!/bin/bash
 # zfs-repro-vm: the container's entrypoint and VM orchestrator.  Boots the
-# reproducer in this image in one or more tiny VMs (qemu-system-x86_64 inside
-# the container) and puts you on the first VM's serial console.
+# reproducer in this image in one or more tiny VMs (qemu-system-x86_64, or
+# qemu-system-s390x under TCG for the big-endian target, inside the
+# container) and puts you on the first VM's serial console.
 #
 #   podman run --rm -it --device /dev/kvm IMAGE [--console]
 #   podman run --rm --device /dev/kvm IMAGE --check      (exit 0 = as expected)
@@ -67,6 +68,15 @@ info() {
 
 detect_accel() {
 	ACCEL=${ZFS_REPRO_ACCEL:-}
+	if [ "$ARCH" != "$(uname -m)" ]; then
+		# another guest architecture (the s390x big-endian target): KVM can
+		# only run the host's own, so this is always software emulation
+		ACCEL=tcg CPU=max TMULT=${ZFS_REPRO_TMULT:-$(bv TCG_TMULT)}; TMULT=${TMULT:-20}
+		warn "this is an $ARCH VM on an $(uname -m) host: KVM can't run it, so it runs under"
+		warn "software emulation (TCG) only, several times slower than KVM; the timeouts"
+		warn "are ${TMULT}x the reproducer's.  /dev/kvm is not needed (or used)."
+		return
+	fi
 	if [ -z "$ACCEL" ]; then
 		[ -c /dev/kvm ] && (: <>/dev/kvm) 2>/dev/null && ACCEL=kvm
 	fi
@@ -95,7 +105,7 @@ setup() {
 	fi
 	LABEL=$LABELS
 	[ "$(bv KERNEL)" = "$(zv KERNEL)" ] || die "the build is for kernel $(zv KERNEL), the base has $(bv KERNEL)"
-	BOOT=$(bv BOOT) RUNDISK=$(bv RUN_DISK)
+	BOOT=$(bv BOOT) RUNDISK=$(bv RUN_DISK) ARCH=$(bv ARCH); ARCH=${ARCH:-x86_64}
 	MEM=${MEM:-$(rv MEM)} CPUS=${CPUS:-$(rv CPUS)} TIMEOUT=${TIMEOUT:-$(rv TIMEOUT)}
 	DISKS=$(rv DISKS) BYTES=$(rv DISK_BYTES)
 	VMS=$(rv VMS); VMS=${VMS:-1}
@@ -111,7 +121,7 @@ setup() {
 hlog() { printf '%s %s\n' "$(date -u +%T)" "$*" >>"$HLOG"; }
 envfile() {
 	{
-		for k in ID LABEL BOOT RUNDISK MEM CPUS TIMEOUT DISKS BYTES VMS SHARED NETWORK HOSTIDS \
+		for k in ID LABEL BOOT RUNDISK ARCH MEM CPUS TIMEOUT DISKS BYTES VMS SHARED NETWORK HOSTIDS \
 		    RESULT_VM RUN D TS ACCEL CPU TMULT HLOG INSPECT; do
 			printf '%s=%s\n' "$k" "$(q "${!k}")"
 		done
@@ -168,26 +178,28 @@ qemu_args() {	# qemu_args I: the command line of VM I in the array A
 	[ -n "$INSPECT" ] && ser=zfsdemo-insp
 	[ "$SHARED" = 1 ] && share=,share-rw=on
 	local qb mach; qb=$(bv QEMU) mach=$(bv MACHINE)	# a base may name another qemu (another architecture)
+	# s390x: channel-attached (virtio-ccw) devices with fixed device
+	# numbers, and the SCLP console as serial0 (below)
 	A=("${qb:-qemu-system-x86_64}" -name "zfs-repro-${ID//\//-}-$LABEL-vm$i" -machine "${mach:-pc},accel=$ACCEL" -cpu "$CPU"
 	    -m "$MEM" -smp "$CPUS" -nodefaults -no-user-config -display none -no-reboot)
 	if [ "$BOOT" = kernel ]; then
 		A+=(-kernel "$B/vmlinuz")
 		[ -f "$B/initrd" ] && A+=(-initrd "$B/initrd")
 		A+=(-append "$(bv CMDLINE)" -drive "file=$D/vm$i.overlay.qcow2,format=qcow2,if=none,id=d0,cache=unsafe"
-		    -device virtio-blk-pci,drive=d0)
+		    -device "$(vdev blk 0),drive=d0")
 	else
 		A+=(-drive "file=$D/vm$i.overlay.qcow2,format=qcow2,if=none,id=d0,cache=unsafe"
-		    -device virtio-blk-pci,drive=d0,bootindex=0)
+		    -device "$(vdev blk 0),drive=d0,bootindex=0")
 	fi
 	# the demo and the build, read-only; the serials tell the guest which is which
 	if [ -n "$(zv LEGACY_LABEL)" ]; then	# a FreeBSD disk with the demo and the build in one
 		A+=(-drive "file=$Z/build.qcow2,format=qcow2,if=none,id=d1,readonly=on"
-		    -device "virtio-blk-pci,drive=d1,serial=zfsdemo-build-$(zv LEGACY_LABEL)")
+		    -device "$(vdev blk 1),drive=d1,serial=zfsdemo-build-$(zv LEGACY_LABEL)")
 	else
 		A+=(-drive "file=$R/demo.qcow2,format=qcow2,if=none,id=d1,readonly=on"
-		    -device "virtio-blk-pci,drive=d1,serial=zfsdemo-demo"
+		    -device "$(vdev blk 1),drive=d1,serial=zfsdemo-demo"
 		    -drive "file=$Z/build.qcow2,format=qcow2,if=none,id=d2,readonly=on"
-		    -device "virtio-blk-pci,drive=d2,serial=zfsdemo-build-$LABEL")
+		    -device "$(vdev blk 2),drive=d2,serial=zfsdemo-build-$LABEL")
 	fi
 	# run disks as node chains file fN -> raw rN -> device rdN, so filters
 	# (blkdebug errors) can be put between fN and rN while the VM runs
@@ -195,19 +207,35 @@ qemu_args() {	# qemu_args I: the command line of VM I in the array A
 		[ -n "$f" ] || continue
 		A+=(-blockdev "driver=file,node-name=f$n,filename=$f,locking=off"
 		    -blockdev "driver=raw,node-name=r$n,file=f$n"
-		    -device "virtio-blk-pci,drive=r$n,id=rd$n,serial=$ser$n$share")
+		    -device "$(vdev blk $((n + 16))),drive=r$n,id=rd$n,serial=$ser$n$share")
 		n=$((n + 1))
 	done <"$D/vm$i.disks"
 	if [ "$NETWORK" = 1 ]; then
 		local srv=off; [ "$i" = 0 ] && srv=on
 		A+=(-netdev "stream,id=n0,server=$srv,addr.type=unix,addr.path=$D/net0.sock$([ $srv = off ] && echo ,reconnect-ms=500)"
-		    -device "virtio-net-pci,netdev=n0,mac=52:54:00:5a:00:0$((i + 1))")
+		    -device "$(vdev net 8),netdev=n0,mac=52:54:00:5a:00:0$((i + 1))")
 	fi
-	A+=(-device virtio-rng-pci
-	    -chardev "pipe,id=s0,path=$D/vm$i.s0,logfile=$(log0 "$i"),logappend=on" -serial chardev:s0
-	    -chardev "file,id=s1,path=$(log1 "$i"),append=on" -serial chardev:s1
-	    -chardev "pipe,id=ctl,path=$D/vm$i.ctl" -serial chardev:ctl
-	    -qmp "unix:$D/vm$i.qmp,server=on,wait=off")
+	# (s390x: no virtio-rng, a module in Ubuntu's s390x kernel)
+	[ "$ARCH" = s390x ] || A+=(-device "$(vdev rng 9)")
+	A+=(-chardev "pipe,id=s0,path=$D/vm$i.s0,logfile=$(log0 "$i"),logappend=on"
+	    -chardev "file,id=s1,path=$(log1 "$i"),append=on"
+	    -chardev "pipe,id=ctl,path=$D/vm$i.ctl")
+	if [ "$ARCH" = s390x ]; then
+		# serial0 = the SCLP VT220 console (ttysclp0); the kernel log and
+		# the zr channel are virtio consoles (hvc0, hvc1)
+		A+=(-device sclpconsole,chardev=s0 -device "virtio-serial-ccw,devno=fe.0.000a"
+		    -device virtconsole,chardev=s1 -device virtconsole,chardev=ctl)
+	else
+		A+=(-serial chardev:s0 -serial chardev:s1 -serial chardev:ctl)
+	fi
+	A+=(-qmp "unix:$D/vm$i.qmp,server=on,wait=off")
+}
+# vdev KIND N: the virtio device (blk, net, rng) for this architecture; on
+# s390x N is a fixed ccw device number (fe.0.N: 0 root, 1-2 demo and build,
+# 16+N run disk N)
+vdev() {
+	if [ "$ARCH" = s390x ]; then printf 'virtio-%s-ccw,devno=fe.0.%04x' "$1" "$2"
+	else printf 'virtio-%s-pci' "$1"; fi
 }
 vm_start() {	# vm_start I: boot VM I (again: same overlay and disks)
 	local i=$1
@@ -293,7 +321,9 @@ disk_unplug() {	# disk_unplug VM N: hot-unplug run disk N (the guest sees it go)
 disk_plug() {	# disk_plug VM N: plug run disk N back in
 	local ser=zfsdemo-run share=; [ -n "$INSPECT" ] && ser=zfsdemo-insp
 	[ "$SHARED" = 1 ] && share=',"share-rw":true'
-	qmp "$1" "{\"execute\":\"device_add\",\"arguments\":{\"driver\":\"virtio-blk-pci\",\"drive\":\"r$2\",\"id\":\"rd$2\",\"serial\":\"$ser$2\"$share}}" >/dev/null
+	local drv=virtio-blk-pci
+	[ "$ARCH" = s390x ] && drv=virtio-blk-ccw share="$share,\"devno\":\"$(printf 'fe.0.%04x' $(($2 + 16)))\""
+	qmp "$1" "{\"execute\":\"device_add\",\"arguments\":{\"driver\":\"$drv\",\"drive\":\"r$2\",\"id\":\"rd$2\",\"serial\":\"$ser$2\"$share}}" >/dev/null
 }
 # disk_errors VM N RULES: put a blkdebug filter with RULES (a JSON list of
 # inject-error rules) under run disk N, e.g.
@@ -502,8 +532,8 @@ run_series() {
 		if [ "$booted" = 0 ]; then
 			RUNSFX=-r$i; prepare >/dev/null; start_all
 			for v in $(seq 0 $((VMS - 1))); do drain "$v"; done
-			if ! vm_wait 0 'press Up, Enter' 90; then
-				printf '%s ERROR 0 %s %s %s\n' "$i" "$(($(date +%s) - t0))" "$TS" "no shell prompt" >>"$SER/results"
+			if ! vm_wait 0 "press Up, Enter|$PANIC_RE" 90 || grep -aEq "$PANIC_RE" "$(log0 0)"; then
+				printf '%s ERROR 0 %s %s %s\n' "$i" "$(($(date +%s) - t0))" "$TS" "no shell prompt (or a panic while booting)" >>"$SER/results"
 				stop_all; i=$((i + step)); continue
 			fi
 			booted=1; o=0
@@ -543,7 +573,9 @@ check() {	# --check (and --runs): boot, run the demo, wait for RESULT or a panic
 		trap 'stop_all' EXIT
 		start_all
 		for i in $(seq 0 $((VMS - 1))); do drain "$i"; done
-		vm_wait 0 'press Up, Enter' 90 || { tail -30 "$(log0 0)" >&2; warn "no shell prompt after $((90 * TMULT)) s"; exit 1; }
+		# (a panic while booting ends the wait at once: TCG timeouts are long)
+		vm_wait 0 "press Up, Enter|$PANIC_RE" 90 || { tail -30 "$(log0 0)" >&2; warn "no shell prompt after $((90 * TMULT)) s"; exit 1; }
+		grep -aEq "$PANIC_RE" "$(log0 0)" && { tail -30 "$(log0 0)" | tr -d '\r' >&2; warn "the VM panicked while booting"; exit 1; }
 		say "prompt $(($(date +%s) - t0))s"
 		grep -a '^\*\*\* ' "$(log0 0)" | tr -d '\r'
 		sleep 1.5

@@ -56,6 +56,7 @@ read them.
 | `REPEAT_IN_VM` | `1`: `--runs` may run the demo again in the same booted VM (the demo recreates its pool), rebooting only after a panic |
 | `TARGETS`, `SKIP_TARGETS` | the targets to build for (default: every x86_64 Linux target), and ones to leave out |
 | `LOCAL_TARGETS` | targets built outside CI, for example FreeBSD (`scripts/freebsd-image.sh`) |
+| `EXTRA_TARGETS` | targets added to the default list, for example the big-endian `ubuntu24-s390x` (not built unless named) |
 | `MEM`, `CPUS`, `TIMEOUT` | VM memory (MiB), vCPUs, and seconds to wait for RESULT |
 | `DISKS`, `DISK_SIZE` | the number of sparse run disks per VM (or shared), and their size (`1G`) |
 | `VMS` | the number of VMs (default 1). VM0 runs the demo. The others boot to a prompt and act only when typed at (host.sh `vm_type`) |
@@ -90,7 +91,10 @@ with triggers (`host.sh`) work the same way: every run boots its own VMs.
   `zfsdemo-runN`, so a demo can find a disk again after a replug
   (`/sys/block/vd*/serial`).
 - Serial ports: ttyS0 is the root shell. ttyS1 gets the kernel log, plus the
-  `bash -x` trace of an Up, Enter run. ttyS2 is the host channel.
+  `bash -x` trace of an Up, Enter run. ttyS2 is the host channel. On s390x
+  these are the SCLP console `ttysclp0` and the virtio consoles `hvc0` and
+  `hvc1` (`$SER1` and `zr` know). The disks are virtio-ccw and probe in
+  parallel, so the names are even less fixed there: use the variables.
 - A demo **exports** its pool at the end and doesn't destroy it, so
   `--disk` can inspect the run disk later.
 

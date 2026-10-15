@@ -1,0 +1,15 @@
+# The optional s390x runtime layer: the runtime plus qemu-system-s390x, for
+# the big-endian target (bases/ubuntu24-s390x).  Only the s390x userland's
+# images are built FROM it, so x86_64 images don't carry it.  There is no
+# KVM for s390x guests on x86_64 hosts: these VMs always run under TCG.
+# prune.sh deleted the shared libraries qemu-system-x86_64 doesn't use, and
+# apk still lists their packages as installed: reinstall the packages of any
+# library qemu-system-s390x is missing.
+ARG RUNTIME
+FROM ${RUNTIME}
+RUN apk add --no-cache qemu-system-s390x >/dev/null && rm -f /usr/share/qemu/s390-netboot.img && \
+    for l in $(ldd /usr/bin/qemu-system-s390x 2>&1 | sed -n 's/^\t*\([^ ]*\) => not found.*/\1/p; s/.*Error loading shared library \([^:]*\):.*/\1/p'); do \
+	p=$(apk info -q --who-owns "/usr/lib/$l" 2>/dev/null | head -1); [ -n "$p" ] || p=$(apk info -q --who-owns "/lib/$l" | head -1); \
+	echo "restoring $l ($p)"; apk fix -q --reinstall "${p%%-[0-9]*}" >/dev/null; \
+    done && ldd /usr/bin/qemu-system-s390x >/dev/null && /usr/bin/qemu-system-s390x --version | head -1
+LABEL org.opencontainers.image.description="zfs-repro runtime with qemu-system-s390x (TCG; no reproducer)"

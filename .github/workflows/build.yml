@@ -14,6 +14,15 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      ids:
+        description: 'only these reproducers (USER/SLUG, space separated; default: all)'
+        required: false
+        default: ''
+      targets:
+        description: 'only these targets (space separated; default: each reproducer''s own)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -35,10 +44,15 @@ jobs:
       - name: The builds' commits are public
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          IN_IDS: ${{ inputs.ids }}
+          IN_TARGETS: ${{ inputs.targets }}
         run: |
           # a reproducer whose commits aren't public (any more: a force-push)
           # is left out of this run, with a warning
           ok=
+          # workflow_dispatch can narrow the run (inputs ids, targets)
+          export ONLY_IDS="$IN_IDS"
+          echo "ONLY_TARGETS=$IN_TARGETS" >>"$GITHUB_ENV"
           for id in $(builder/build.sh ids); do
             if builder/build.sh verify "$id"; then ok="$ok $id"
             else echo "::warning::$id left out: its build commits are not reachable from its branch"; fi
@@ -59,6 +73,10 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.plan).userlands }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # another architecture (s390x): the builders run under qemu-user;
+      # Ubuntu's qemu-user-static registers it with binfmt_misc (flag F)
+      - if: matrix.arch != 'x86_64'
+        run: sudo apt-get install -y -qq qemu-user-static >/dev/null && ls /proc/sys/fs/binfmt_misc/ | grep -c qemu
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: work/cache/builder-u-${{ matrix.userland }}.tar.zst
@@ -83,6 +101,10 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.plan).targets }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # another architecture (s390x): the builders run under qemu-user;
+      # Ubuntu's qemu-user-static registers it with binfmt_misc (flag F)
+      - if: matrix.arch != 'x86_64'
+        run: sudo apt-get install -y -qq qemu-user-static >/dev/null && ls /proc/sys/fs/binfmt_misc/ | grep -c qemu
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: work/cache/builder-${{ matrix.target }}.tar.zst
@@ -97,7 +119,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: work/userlands/${{ matrix.userland }}
-          key: ${{ fromJSON(needs.plan.outputs.plan).userlands[0].userland_key }}
+          key: ${{ matrix.userland_key }}
           fail-on-cache-miss: true
       - if: steps.cache.outputs.cache-hit != 'true'
         run: builder/build.sh kernel ${{ matrix.target }}
@@ -114,6 +136,10 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.plan).zfs }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # another architecture (s390x): the builders run under qemu-user;
+      # Ubuntu's qemu-user-static registers it with binfmt_misc (flag F)
+      - if: matrix.arch != 'x86_64'
+        run: sudo apt-get install -y -qq qemu-user-static >/dev/null && ls /proc/sys/fs/binfmt_misc/ | grep -c qemu
       - id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -123,7 +149,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: work/cache/builder-u-${{ matrix.userland }}.tar.zst
-          key: ${{ fromJSON(needs.plan.outputs.plan).userlands[0].builder_key }}
+          key: ${{ matrix.ubuilder_key }}
           fail-on-cache-miss: true
       - if: steps.cache.outputs.cache-hit != 'true'
         env:
@@ -152,6 +178,10 @@ jobs:
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # another architecture (s390x): the builders run under qemu-user;
+      # Ubuntu's qemu-user-static registers it with binfmt_misc (flag F)
+      - if: matrix.arch != 'x86_64'
+        run: sudo apt-get install -y -qq qemu-user-static >/dev/null && ls /proc/sys/fs/binfmt_misc/ | grep -c qemu
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -171,7 +201,7 @@ jobs:
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: work/userlands/${{ matrix.userland }}
-          key: ${{ fromJSON(needs.plan.outputs.plan).userlands[0].userland_key }}
+          key: ${{ matrix.userland_key }}
           fail-on-cache-miss: true
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -214,7 +244,7 @@ jobs:
             echo "OpenZFS build FAILED for this kernel" >>"$GITHUB_STEP_SUMMARY"
             echo "built=no" >>"$GITHUB_OUTPUT"; exit 0
           fi
-          builder/build.sh demo "$ID"
+          builder/build.sh demo "$ID" "$TARGET"
           builder/build.sh disks "$ID" "$TARGET"
           builder/build.sh images "$ID" "$TARGET"
           builder/build.sh sizes "$ID" "$TARGET"

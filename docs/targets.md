@@ -34,6 +34,11 @@ platforms):
 | freebsd15-1s | freebsd15-1s | 15.1-STABLE (stable/15-n285872-a689dd9f2b17, 2026-10-08 snapshot) | FreeBSD CI snapshot | built on FreeBSD |
 | freebsd16-0c | freebsd16-0c | 16.0-CURRENT (main-n289844-a52c50b4b7c2, 2026-10-05 snapshot) | the same | built on FreeBSD |
 
+One target is not an upstream CI platform: `ubuntu24-s390x`, the big-endian
+target (Ubuntu 24.04's `6.8.0-142-generic` for s390x, from the ports archive at
+the same snapshot). openzfs/zfs CI runs no big-endian kernel; it is named
+after `ubuntu24` plus the architecture. Reproducers opt in (`EXTRA_TARGETS`).
+
 Not in the matrix: upstream's optional platforms (`centos-stream9/10`,
 `debian11`, `freebsd14-5s`, `archlinux`, `tumbleweed`), which the default
 `zfs-qemu` run doesn't use.
@@ -64,6 +69,33 @@ Not in the matrix: upstream's optional platforms (`centos-stream9/10`,
   current minor release, and Alpine keeps only the latest `linux-stable`: when
   one of them goes, CI's builder for that target fails until the target is
   moved on (the cached builder keeps working meanwhile).
+
+## The big-endian target (s390x)
+
+- `userlands/ubuntu24-s390x` is the ubuntu24 userland built for s390x, from
+  the s390x image of the same Ubuntu index and snapshot. Its root is a GPT
+  partition booted by PARTUUID: virtio-ccw disks probe in parallel, so the
+  root isn't always `vda`. Its console is `ttysclp0`, and `/etc/demo-base.conf`
+  sends the kernel log to `hvc0` and the `zr` channel to `hvc1`.
+- The builders (userland and target) run under qemu-user, so the host (and
+  CI) needs binfmt_misc with the F flag, e.g. Ubuntu's `qemu-user-static`.
+  The OpenZFS builds are compiled natively for s390x under emulation:
+  about 25 minutes for a full debug build on a 32-thread host, longer on
+  CI's 4-core runners, and cached by commit like every other build. Cross
+  compiling would be faster but needs the kernel's host tools (modpost,
+  fixdep) for x86_64, which Ubuntu's s390x headers package doesn't have.
+- The base.conf names `QEMU=qemu-system-s390x` and `MACHINE=s390-ccw-virtio`.
+  The runtime then always uses TCG (`-cpu max`), multiplies every timeout by
+  `TCG_TMULT` (default 20), and attaches virtio-ccw devices with fixed device
+  numbers (`fe.0.0000` root, `.0001` demo, `.0002` build, `.0010 + N` run disk
+  N, hotplugged through the channel subsystem), the SCLP console and two
+  virtio consoles. There is no virtio-rng (a module in this kernel).
+- `runtime/Containerfile.s390x` adds qemu-system-s390x (11.6 MB) on top of the
+  pruned runtime; it reinstalls the package of any shared library prune.sh
+  removed that qemu-system-s390x needs (none, with Alpine 3.22's qemu 10.0).
+  Only the s390x userland layer is built on it.
+- The demo disk's compiled helpers (`*.c`) are built for s390x too, in
+  `work/demos-s390x/ID`, so an s390x image has its own demo layer.
 
 ## Moving a target to a newer kernel
 
