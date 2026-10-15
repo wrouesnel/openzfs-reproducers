@@ -1,9 +1,11 @@
 # The runtime layer every reproducer image shares: qemu and the entrypoint.
+# prune.sh drops what qemu's packages bring that a VM here never uses (helper
+# tools, other machines' firmware, modules, and the libraries only those
+# needed): 81 MB -> 63 MB unpacked, 30 MB -> 22 MB compressed.
 FROM docker.io/library/alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
-RUN apk add --no-cache bash socat coreutils qemu-system-x86_64 qemu-img tmux sfdisk grep less ncurses-terminfo-base && \
-    cd /usr/share/qemu && rm -rf edk2-* *.dtb hppa-* palcode-* openbios-* s390-* skiboot* \
-	slof* u-boot* opensbi* npcm* QEMU,* pnv-* qemu_vga.ndrv vof* && \
-    mkdir -p /runs /sources
+COPY prune.sh /tmp/prune.sh
+RUN apk add --no-cache bash socat coreutils qemu-system-x86_64 qemu-img tmux sfdisk grep less ncurses-terminfo-base >/dev/null && \
+    sh /tmp/prune.sh && rm /tmp/prune.sh && mkdir -p /runs /sources
 COPY zfs-repro-vm /zfs-repro/bin/zfs-repro-vm
 WORKDIR /runs
 ENTRYPOINT ["/zfs-repro/bin/zfs-repro-vm"]

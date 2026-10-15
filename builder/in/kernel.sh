@@ -34,10 +34,14 @@ mods=()
 for m in virtio_pci virtio_blk ext4 $(find "$MD" -name '*.ko' | norm | sort); do
 	for p in $(order "$m"); do mods+=("$p"); done
 done
-# all of the boot path built in (Ubuntu's generic kernel): no initramfs,
-# and the optional modules (virtio_rng, ...) aren't worth one
+# order() runs in a subshell per module: drop the repeats (the first
+# occurrence keeps dependencies before their users)
+mapfile -t mods < <(printf '%s\n' "${mods[@]}" | awk 'NF && !s[$0]++')
+# the boot path and virtio_net (a private link between VMs) all built in
+# (Ubuntu's generic kernel): no initramfs; the other optional modules
+# (virtio_rng, loop, ...) aren't worth one
 bi=1
-for m in virtio_pci virtio_blk ext4; do norm <"$MD/modules.builtin" | grep -qx "$m" || bi=0; done
+for m in virtio_pci virtio_blk ext4 virtio_net; do norm <"$MD/modules.builtin" | grep -qx "$m" || bi=0; done
 [ $bi = 1 ] && { echo "boot path built in, no initramfs (optional modules left out: ${mods[*]##*/})"; mods=(); }
 { [ -f "$MD/modules.builtin" ] && norm <"$MD/modules.builtin"; for p in "${mods[@]}"; do echo "$p" | norm; done; } | sort -u >"$O/modules"
 for m in virtio_pci virtio_blk ext4; do grep -qx "$m" "$O/modules" || { echo "$K has no $m" >&2; exit 1; }; done

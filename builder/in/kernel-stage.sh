@@ -12,8 +12,9 @@ set -eu
 K=$1 R=$2
 WANT="virtio_pci virtio_blk ext4 virtio_net virtio_rng loop zlib_deflate zlib_inflate
     libcrc32c crc32c_generic crc32c_intel"
+# merged /usr (Debian 13, Fedora): depmod -b wants ROOT/lib/modules
+[ ! -e "$R/lib" ] && [ -d "$R/usr/lib/modules" ] && ln -s usr/lib "$R/lib"
 M=$R/lib/modules/$K
-[ -d "$M" ] || M=$R/usr/lib/modules/$K
 [ -d "$M" ] || { echo "kernel-stage: no modules dir for $K in $R" >&2; exit 1; }
 O=/kernel/lib/modules/$K
 mkdir -p "$O"
@@ -25,7 +26,7 @@ for f in modules.builtin modules.builtin.modinfo modules.order; do
 	[ -f "$M/$f" ] && cp "$M/$f" "$O/"
 done
 # module name -> path in modules.dep (names: '-' and '_' are the same)
-depmod -b "$R" "$K" 2>/dev/null || true
+[ -f "$M/modules.dep" ] || depmod -b "$R" "$K"
 norm() { echo "$1" | sed 's|.*/||; s|\.ko.*$||; s|-|_|g'; }
 seen=" "
 add() {

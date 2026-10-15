@@ -84,7 +84,7 @@ tag_of() {
 	echo "$l-$u-$s-$h$tail"
 }
 img_of() { echo "$IMAGE:$(tag_of "$@")"; }
-tag_runtime() { echo "$IMAGE:runtime-$(hashof runtime/Containerfile runtime/zfs-repro-vm | cut -c1-12)"; }
+tag_runtime() { echo "$IMAGE:runtime-$(hashof runtime/Containerfile runtime/prune.sh runtime/zfs-repro-vm | cut -c1-12)"; }
 tag_userland() { echo "$IMAGE:userland-$1-$(cat "$WORK/userlands/$1/hash")"; }
 tag_kernel() { echo "$IMAGE:kernel-$1-$(kver "$1")"; }
 tag_demo() { echo "localhost/zfs-repro-demo:$(idtag "$1")-$2"; }
@@ -147,7 +147,11 @@ cmd_kernel() {
 	[ -f "$WORK/userlands/$u/busybox" ] || cmd_userland "$u"
 	rm -rf "$o.tmp"
 	inb "$t" bash /src/builder/in/kernel.sh "$t" "/work/targets/$t.tmp" "/work/userlands/$u/busybox"
-	echo "USERLAND='$u'" >>"$o.tmp/base.conf"
+	{
+		echo "USERLAND='$u'"
+		# another architecture: the qemu and machine the runtime uses for it
+		for k in QEMU MACHINE; do [ -n "$(tconf "$t" $k)" ] && echo "$k='$(tconf "$t" $k)'"; done
+	} >>"$o.tmp/base.conf"
 	rm -rf "$o"; mv "$o.tmp" "$o"
 }
 zdir() {	# zdir user|kmod U|T REPO@SHA CONFIGURE...: the work dir of one OpenZFS half
