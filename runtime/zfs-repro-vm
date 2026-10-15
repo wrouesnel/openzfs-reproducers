@@ -3,16 +3,17 @@
 # reproducer in this image in one or more tiny VMs (qemu-system-x86_64 inside
 # the container) and puts you on the first VM's serial console.
 #
-#   podman run --rm -it --device /dev/kvm IMAGE [LABEL] [--console]
-#   podman run --rm --device /dev/kvm IMAGE LABEL --check      (exit 0 = as expected)
-#   podman run --rm -it --device /dev/kvm -v ./runs:/runs IMAGE LABEL --disk /runs/FILE.raw
+#   podman run --rm -it --device /dev/kvm IMAGE [--console]
+#   podman run --rm --device /dev/kvm IMAGE --check      (exit 0 = as expected)
+#   podman run --rm --device /dev/kvm IMAGE --check --runs 20 [--until-fail] [--parallel 4]
+#   podman run --rm -it --device /dev/kvm -v ./runs:/runs IMAGE --disk /runs/FILE.raw
 #   podman run --rm IMAGE --info | --sources | --help
 #
-# LABEL is one of the image's OpenZFS builds, usually "bug" (unfixed) and
-# "fix" (the proposed fix); the default is the first.  At the VM's root
-# prompt, Up, Enter runs the demo, which prints a RESULT line; `poweroff`
-# exports the demo's pool and ends the VM; Ctrl-] leaves at once (and stops
-# the VMs).
+# An image holds one OpenZFS build of one reproducer for one kernel: the tag
+# says which, repro-USER-SLUG-TARGET-KERNEL (the break, unfixed) or
+# fixed-USER-SLUG-TARGET-KERNEL (the fix branch).  At the VM's root prompt,
+# Up, Enter runs the demo, which prints a RESULT line; `poweroff` exports
+# the demo's pool and ends the VM; Ctrl-] leaves at once (and stops the VMs).
 #
 # The container is the VMs' host, so a reproducer can also act from outside
 # them: its host.sh (and the built-in triggers below) can pause a VM, cut its
@@ -21,14 +22,15 @@
 # The demo asks for these with `zr trigger NAME ARGS` in the guest (a line
 # protocol on the VM's third serial port).  See docs/reproducer-format.md.
 #
-# Files: the base system (/zfs-repro/base), the reproducer disk and host.sh
-# (/zfs-repro/repro) and the sources (/sources) are read-only image layers.
+# Files: the base system (/zfs-repro/base: the userland root disk, the
+# kernel), the demo disk and host.sh (/zfs-repro/repro), the OpenZFS build's
+# disk (/zfs-repro/build) and the sources (/sources) are read-only image layers.
 # Each run makes throwaway overlays of the base and new sparse run disks in
 # /runs (the container's writable layer; mount a volume there to keep them).
 # Environment: ZFS_REPRO_ACCEL (kvm|tcg), MEM, CPUS, TIMEOUT (override the
 # reproducer's defaults), ZFS_REPRO_RUNS (default /runs).
 
-B=/zfs-repro/base R=/zfs-repro/repro
+B=/zfs-repro/base R=/zfs-repro/repro Z=/zfs-repro/build
 SELF=$(readlink -f "$0")
 say() { printf '%s\n' "$*"; }
 warn() { printf 'zfs-repro: %s\n' "$*" >&2; }
@@ -44,19 +46,22 @@ qcmd() { local s= a; for a in "$@"; do printf '%s' "$s"; q "$a"; s=' '; done; pr
 v() { (. "$1" >/dev/null 2>&1; eval "printf '%s' \"\${$2:-}\""); }
 rv() { v "$R/repro.conf" "$1"; }
 bv() { v "$B/base.conf" "$1"; }
+zv() { v "$Z/build.conf" "$1"; }
 
 info() {
 	say "zfs-repro reproducer $(rv ID): $(rv TITLE)"
 	for n in $(rv PRS); do say "  PR:     https://github.com/openzfs/zfs/pull/$n"; done
 	for n in $(rv ISSUES); do say "  issue:  https://github.com/openzfs/zfs/issues/$n"; done
-	[ -n "$(rv BRANCH)" ] && say "  branch: $(rv BRANCH)"
-	say "  system: $(bv NAME): $(bv DISTRO), $(bv OS) $(bv KERNEL)"
+	[ -n "$(rv BRANCH)" ] && say "  branch: $(rv REPO)/tree/$(rv BRANCH)"
+	[ -n "$(rv AUTHOR)" ] && say "  fix by: $(rv AUTHOR)"
+	[ -n "$(rv REPORTER)" ] && say "  reported by: $(rv REPORTER)"
+	say "  image:  $(zv TAG) ($(zv LABEL): $([ "$(zv LABEL)" = repro ] && echo 'the break, unfixed' || echo 'the fix'))"
+	say "  system: $(bv TARGET): $(bv DISTRO), $(bv OS) $(bv KERNEL)"
 	say "  VMs:    $(rv VMS | sed 's/^$/1/'), run disks: $(rv DISKS) x $(rv DISK_SIZE)$([ "$(rv SHARED_DISKS)" = 1 ] && echo ' (shared by the VMs)')$([ -f "$R/host.sh" ] && echo ', host.sh triggers')"
-	for l in $(rv BUILDS); do
-		say "  build '$l': $(rv "BUILD_$l")"
-		say "      $(rv "BUILD_${l}_MARKER") ($(rv "BUILD_${l}_ZFS"))"
-		say "      expect: $(rv "EXPECT_$l")"
-	done
+	say "  build:  $(zv BUILD)"
+	say "      $(zv MARKER) ($(zv ZFS))"
+	say "      expect: $(zv EXPECT)$([ -n "$(zv RUNS)" ] && echo " (--check: $(zv RUNS) runs, at least $(zv MIN_MATCH | sed "s/^$/$(zv RUNS)/") matching)")"
+	for l in repro fixed; do [ "$l" = "$(zv LABEL)" ] || [ -z "$(rv "EXPECT_$l")" ] || say "  the $l image expects: $(rv "EXPECT_$l")"; done
 	say "  sources: /sources (podman run --rm IMAGE --sources)"
 }
 
@@ -83,11 +88,13 @@ detect_accel() {
 # D/vmI.qmp        QMP socket   D/vmI.pid   D/vmI.disks (one path per line)
 # D/net0.sock      the VM0-VM1 link (NETWORK=1)
 setup() {
-	[ -f "$R/repro.conf" ] && [ -f "$B/base.conf" ] || die "this image has no reproducer (only the runtime or a base)"
-	ID=$(rv ID) LABELS=$(rv BUILDS)
-	[ -n "$LABEL" ] || LABEL=${LABELS%% *}
-	case " $LABELS " in *" $LABEL "*) ;; *) die "no build '$LABEL' here (builds: $LABELS)" ;; esac
-	[ "$(bv KERNEL)" = "$(rv KERNEL)" ] || die "the reproducer is for kernel $(rv KERNEL), the base has $(bv KERNEL)"
+	[ -f "$R/repro.conf" ] && [ -f "$B/base.conf" ] && [ -f "$Z/build.conf" ] || die "this image has no reproducer (only the runtime, a userland or a kernel)"
+	ID=$(rv ID) LABELS=$(zv LABEL)
+	if [ -n "$LABEL" ] && [ "$LABEL" != "$LABELS" ]; then
+		die "this image is the '$LABELS' build ($(zv TAG)); the other build is another image (repro-... / fixed-...)"
+	fi
+	LABEL=$LABELS
+	[ "$(bv KERNEL)" = "$(zv KERNEL)" ] || die "the build is for kernel $(zv KERNEL), the base has $(bv KERNEL)"
 	BOOT=$(bv BOOT) RUNDISK=$(bv RUN_DISK)
 	MEM=${MEM:-$(rv MEM)} CPUS=${CPUS:-$(rv CPUS)} TIMEOUT=${TIMEOUT:-$(rv TIMEOUT)}
 	DISKS=$(rv DISKS) BYTES=$(rv DISK_BYTES)
@@ -117,7 +124,7 @@ log1() { echo "$RUN/$(vmpfx "$1")$LABEL-$TS.serial1.log"; }
 vmpfx() { [ "$1" = 0 ] || echo "vm$1-"; }
 
 prepare() {
-	TS=$(date -u +%Y%m%dT%H%M%SZ)
+	TS=${SERIES_TS:-$(date -u +%Y%m%dT%H%M%SZ)}${RUNSFX:-}
 	D=$RUN/.zr-$LABEL-$TS
 	mkdir -p "$D" || die "cannot create $D"
 	HLOG=$RUN/$LABEL-$TS.host.log
@@ -160,7 +167,8 @@ qemu_args() {	# qemu_args I: the command line of VM I in the array A
 	local i=$1 n=0 f ser=zfsdemo-run share=
 	[ -n "$INSPECT" ] && ser=zfsdemo-insp
 	[ "$SHARED" = 1 ] && share=,share-rw=on
-	A=(qemu-system-x86_64 -name "zfs-repro-$ID-$LABEL-vm$i" -machine "pc,accel=$ACCEL" -cpu "$CPU"
+	local qb mach; qb=$(bv QEMU) mach=$(bv MACHINE)	# a base may name another qemu (another architecture)
+	A=("${qb:-qemu-system-x86_64}" -name "zfs-repro-${ID//\//-}-$LABEL-vm$i" -machine "${mach:-pc},accel=$ACCEL" -cpu "$CPU"
 	    -m "$MEM" -smp "$CPUS" -nodefaults -no-user-config -display none -no-reboot)
 	if [ "$BOOT" = kernel ]; then
 		A+=(-kernel "$B/vmlinuz")
@@ -171,9 +179,16 @@ qemu_args() {	# qemu_args I: the command line of VM I in the array A
 		A+=(-drive "file=$D/vm$i.overlay.qcow2,format=qcow2,if=none,id=d0,cache=unsafe"
 		    -device virtio-blk-pci,drive=d0,bootindex=0)
 	fi
-	# the reproducer, read-only; its serial selects the build the guest loads
-	A+=(-drive "file=$R/repro.qcow2,format=qcow2,if=none,id=d1,readonly=on"
-	    -device "virtio-blk-pci,drive=d1,serial=zfsdemo-build-$LABEL")
+	# the demo and the build, read-only; the serials tell the guest which is which
+	if [ -n "$(zv LEGACY_LABEL)" ]; then	# a FreeBSD disk with the demo and the build in one
+		A+=(-drive "file=$Z/build.qcow2,format=qcow2,if=none,id=d1,readonly=on"
+		    -device "virtio-blk-pci,drive=d1,serial=zfsdemo-build-$(zv LEGACY_LABEL)")
+	else
+		A+=(-drive "file=$R/demo.qcow2,format=qcow2,if=none,id=d1,readonly=on"
+		    -device "virtio-blk-pci,drive=d1,serial=zfsdemo-demo"
+		    -drive "file=$Z/build.qcow2,format=qcow2,if=none,id=d2,readonly=on"
+		    -device "virtio-blk-pci,drive=d2,serial=zfsdemo-build-$LABEL")
+	fi
 	# run disks as node chains file fN -> raw rN -> device rdN, so filters
 	# (blkdebug errors) can be put between fN and rN while the VM runs
 	while read -r f; do
@@ -385,17 +400,15 @@ stop_all() {
 }
 
 banner() {
-	say "== zfs-repro $ID, build '$LABEL'"
+	say "== zfs-repro $ID, $([ "$LABEL" = repro ] && echo 'the break (repro)' || echo 'the fix (fixed)'): $(zv TAG)"
 	say "   $(rv TITLE)"
+	say "   branch: $(rv REPO)/tree/$(rv BRANCH)"
 	for n in $(rv PRS); do say "   PR:     https://github.com/openzfs/zfs/pull/$n"; done
-	say "   build:  $(rv "BUILD_${LABEL}_MARKER")"
-	say "   system: $(bv NAME) ($(bv OS) $(bv KERNEL)), $MEM MiB, $CPUS vCPUs, $DISKS x $(rv DISK_SIZE) run disk(s), $ACCEL"
+	say "   build:  $(zv MARKER)"
+	say "   system: $(bv TARGET) ($(bv OS) $(bv KERNEL)), $MEM MiB, $CPUS vCPUs, $DISKS x $(rv DISK_SIZE) run disk(s), $ACCEL"
 	[ "$VMS" -gt 1 ] && say "   $VMS VMs$([ "$SHARED" = 1 ] && echo ', sharing the run disks')$([ "$NETWORK" = 1 ] && echo ', linked by a private network')"
 	[ -f "$R/host.sh" ] && say "   host.sh: this reproducer acts on the VMs from outside (log: $HLOG)"
-	for _l in $LABELS; do
-		_m='  '; [ "$_l" = "$LABEL" ] && _m='->'
-		say "   $_m expect on '$_l': $(rv "EXPECT_$_l")"
-	done
+	say "   expect: $(zv EXPECT)"
 	if [ -n "$INSPECT" ]; then
 		say "   INSPECTING $INSPECT: the demo is not run; Up, Enter imports the pool and checks it"
 	else
@@ -411,7 +424,7 @@ after() {
 	if [ -z "$INSPECT" ]; then
 		say "run disk(s), with the pool the demo left:"
 		sort -u "$D"/vm*.disks | sed 's/^/   /'
-		say "to inspect them later, mount a volume on /runs and run: IMAGE $LABEL --disk $(sort -u "$D"/vm*.disks | tr '\n' ' ')"
+		say "to inspect them later, mount a volume on /runs and run: IMAGE --disk $(sort -u "$D"/vm*.disks | tr '\n' ' ')"
 	fi
 	say "logs: $RUN/*$LABEL-$TS.serial0.log (console), *.serial1.log (kernel log + trace)$([ -s "$HLOG" ] && echo ", $HLOG (host)")"
 	rm -f "$D"/vm*.overlay.qcow2
@@ -438,54 +451,174 @@ attach() {
 	stty sane 2>/dev/null
 }
 
-check() {	# boot, run the demo, wait for RESULT or a panic, power off, compare
-	local t0 i res exp pat='^panic: |Kernel panic - not syncing' l n
-	t0=$(date +%s)
-	trap 'stop_all' EXIT
-	trap 'exit 130' INT TERM
-	start_all
-	for i in $(seq 0 $((VMS - 1))); do drain "$i"; done
-	vm_wait 0 'press Up, Enter' 90 || { tail -30 "$(log0 0)" >&2; warn "no shell prompt after $((90 * TMULT)) s"; exit 1; }
-	say "prompt $(($(date +%s) - t0))s"
-	grep -a '^\*\*\* ' "$(log0 0)" | tr -d '\r'
-	sleep 1.5
-	vm_type 0 "$UP"
-	l=$(log0 "$RESULT_VM") n=$((TIMEOUT * 5 * TMULT))
+# ---- check and repeated runs --------------------------------------------------
+PANIC_RE='^panic: |Kernel panic - not syncing'
+# classify RESULTLINE PANICKED: OK BUG ERROR PANIC or OTHER
+classify() {
+	[ "$2" = 1 ] && { echo PANIC; return; }
+	case $1 in
+	'RESULT OK'*) echo OK ;; 'RESULT BUG'*) echo BUG ;;
+	'RESULT ERROR'* | '') echo ERROR ;; *) echo OTHER ;;
+	esac
+}
+expected() { if [ -n "$INSPECT" ]; then zv EXPECT_INSPECT; else zv EXPECT; fi; }
+# matches RESULTLINE CLASS: is this the RESULT the image expects?
+matches() {
+	local exp; exp=$(expected)
+	[ -n "$exp" ] || return 0
+	case $exp in PANIC) [ "$2" = PANIC ]; return ;; esac
+	case $1 in "$exp"*) return 0 ;; esac
+	return 1
+}
+# wait_result OFFSET: wait for a RESULT line (or a panic) after byte OFFSET of
+# RESULT_VM's console; sets RES and PANICKED
+wait_result() {
+	local o=$1 i l n
+	l=$(log0 "$RESULT_VM") n=$((TIMEOUT * 5 * TMULT)) PANICKED=0 RES=
 	while [ $n -gt 0 ]; do
-		grep -aEq "^RESULT |$pat" "$l" && break
-		for i in $(seq 0 $((VMS - 1))); do grep -aEq "$pat" "$(log0 "$i")" && break 2; done
+		tail -c +$((o + 1)) "$l" | grep -aEq "^RESULT |$PANIC_RE" && break
+		for i in $(seq 0 $((VMS - 1))); do grep -aEq "$PANIC_RE" "$(log0 "$i")" && break 2; done
 		if ! any_alive && [ ! -f "$D/busy" ]; then sleep 1; any_alive || [ -f "$D/busy" ] || break; fi
 		sleep 0.2; n=$((n - 1))
 	done
 	[ $n -gt 0 ] || warn "no RESULT within $((TIMEOUT * TMULT)) s"
-	if grep -aEq "$pat" "$RUN"/*"$LABEL-$TS".serial0.log; then
-		sleep 3
-		say "PANIC after $(($(date +%s) - t0))s (VMs killed)"
-		grep -ahE -m1 "$pat" "$RUN"/*"$LABEL-$TS".serial0.log | tr -d '\r' | sed 's/^/PANIC: /'
+	if grep -aEq "$PANIC_RE" "$RUN"/*"$LABEL-$TS".serial0.log; then
+		PANICKED=1
+		RES="PANIC: $(grep -ahE -m1 "$PANIC_RE" "$RUN"/*"$LABEL-$TS".serial0.log | tr -d '\r')"
 	else
-		sleep 0.5
-		for i in $(seq $((VMS - 1)) -1 0); do vm_poweroff "$i"; done
-		say "RESULT $(($(date +%s) - t0))s, all off $(($(date +%s) - t0))s after start"
+		RES=$(tail -c +$((o + 1)) "$l" | grep -a '^RESULT ' | tr -d '\r' | tail -1)
 	fi
-	stop_all; trap - EXIT
-	if [ -n "$VERBOSE" ]; then
-		for i in $(seq 0 $((VMS - 1))); do
-			say "---- vm$i serial0"; tr -d '\r' <"$(log0 "$i")"
-			say "---- vm$i serial1"; tr -d '\r' <"$(log1 "$i")"
+}
+# run_series FIRST STEP: runs FIRST, FIRST+STEP, ... up to NRUNS, each a
+# fresh boot with fresh run disks (or, with REPEAT_IN_VM=1, the next run in
+# the same VM while it lives).  One line per run in $SER/results:
+#   INDEX CLASS MATCH SECONDS TS RESULT
+run_series() {
+	local i=$1 step=$2 t0 t1 cls m booted=0 o
+	trap 'stop_all' EXIT
+	while [ "$i" -le "$NRUNS" ]; do
+		[ -f "$SER/stop" ] && break
+		t0=$(date +%s)
+		if [ "$booted" = 0 ]; then
+			RUNSFX=-r$i; prepare >/dev/null; start_all
+			for v in $(seq 0 $((VMS - 1))); do drain "$v"; done
+			if ! vm_wait 0 'press Up, Enter' 90; then
+				printf '%s ERROR 0 %s %s %s\n' "$i" "$(($(date +%s) - t0))" "$TS" "no shell prompt" >>"$SER/results"
+				stop_all; i=$((i + step)); continue
+			fi
+			booted=1; o=0
+			sleep 1.5
+		else
+			o=$(logsize 0)
+			vm_wait 0 '# $' 30 "$((o - 4))" >/dev/null 2>&1; sleep 0.5
+		fi
+		o=$(logsize "$RESULT_VM")
+		vm_type 0 "$UP"
+		wait_result "$o"
+		cls=$(classify "$RES" "$PANICKED")
+		m=0; matches "$RES" "$cls" && m=1
+		t1=$(date +%s)
+		if [ "$REUSE" = 1 ] && [ "$PANICKED" = 0 ] && any_alive && [ -n "$RES" ]; then
+			:	# the VM goes on with the next run
+		else
+			if [ "$PANICKED" = 1 ]; then sleep 3; else sleep 0.5; for v in $(seq $((VMS - 1)) -1 0); do vm_poweroff "$v"; done; fi
+			stop_all; booted=0
+			rm -f "$D"/vm*.overlay.qcow2
+		fi
+		printf '%s %s %s %s %s %s\n' "$i" "$cls" "$m" "$((t1 - t0))" "$TS" "${RES:-no RESULT line}" >>"$SER/results"
+		say "run $i: $cls in $((t1 - t0))s: ${RES:-no RESULT line}"
+		[ "$UNTIL_FAIL" = 1 ] && [ "$cls" != OK ] && touch "$SER/stop"
+		i=$((i + step))
+	done
+	[ "$booted" = 1 ] && { for v in $(seq $((VMS - 1)) -1 0); do vm_poweroff "$v"; done; stop_all; rm -f "$D"/vm*.overlay.qcow2; }
+	trap - EXIT
+}
+
+check() {	# --check (and --runs): boot, run the demo, wait for RESULT or a panic, compare
+	local t0 i res cls p need avail per nok nbug nerr npanic noth nmatch secs first keepts min
+	t0=$(date +%s)
+	trap 'stop_all; exit 130' INT TERM
+	if [ "$NRUNS" = 1 ] && [ -z "$BATCH" ]; then
+		# one run: as before, with the run disks kept for --disk
+		trap 'stop_all' EXIT
+		start_all
+		for i in $(seq 0 $((VMS - 1))); do drain "$i"; done
+		vm_wait 0 'press Up, Enter' 90 || { tail -30 "$(log0 0)" >&2; warn "no shell prompt after $((90 * TMULT)) s"; exit 1; }
+		say "prompt $(($(date +%s) - t0))s"
+		grep -a '^\*\*\* ' "$(log0 0)" | tr -d '\r'
+		sleep 1.5
+		vm_type 0 "$UP"
+		wait_result 0
+		if [ "$PANICKED" = 1 ]; then
+			sleep 3; say "PANIC after $(($(date +%s) - t0))s (VMs killed)"; say "$RES"
+		else
+			sleep 0.5
+			for i in $(seq $((VMS - 1)) -1 0); do vm_poweroff "$i"; done
+			say "RESULT $(($(date +%s) - t0))s, all off $(($(date +%s) - t0))s after start"
+		fi
+		stop_all; trap - EXIT
+		if [ -n "$VERBOSE" ]; then
+			for i in $(seq 0 $((VMS - 1))); do
+				say "---- vm$i serial0"; tr -d '\r' <"$(log0 "$i")"
+				say "---- vm$i serial1"; tr -d '\r' <"$(log1 "$i")"
+			done
+			[ -s "$HLOG" ] && { say "---- host"; cat "$HLOG"; }
+			say "----"
+		fi
+		[ "$PANICKED" = 1 ] || say "${RES:-no RESULT line}"
+		after
+		cls=$(classify "$RES" "$PANICKED")
+		[ "$MODE" = check ] || exit 0
+		[ -n "$(expected)" ] || { say "CHECK: no expected result for this image"; exit 0; }
+		if matches "$RES" "$cls"; then say "CHECK OK: matches the expected '$(expected)'"; exit 0; fi
+		say "CHECK FAILED: expected '$(expected)'"; exit 1
+	fi
+	# repeated runs: workers in parallel, each with its own VMs
+	# prepare() made these for one run; each run of the series makes its own
+	rm -rf "$D"; rm -f "$RUN/$LABEL-$TS".* "$RUN/$LABEL-$TS"-[0-9].raw "$RUN"/vm*-"$LABEL-$TS"*
+	SERIES_TS=$TS
+	SER=$RUN/.zr-series-$LABEL-$TS; mkdir -p "$SER"; : >"$SER/results"
+	p=$PARALLEL
+	per=$(( VMS * (MEM + 160) ))
+	avail=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)
+	if [ -n "$avail" ] && [ $((p * per)) -gt $((avail * 8 / 10)) ]; then
+		p=$(( avail * 8 / 10 / per )); [ "$p" -ge 1 ] || p=1
+		warn "--parallel $PARALLEL needs $((PARALLEL * per)) MiB; $avail MiB available: running $p at once"
+	fi
+	need=$(( $(nproc) / (CPUS * VMS) )); [ "$need" -ge 1 ] || need=1
+	[ "$p" -gt "$need" ] && { warn "--parallel $p: $(nproc) CPUs: running $need at once"; p=$need; }
+	[ "$p" -gt "$NRUNS" ] && p=$NRUNS
+	say "$NRUNS run(s), $p at a time$([ "$UNTIL_FAIL" = 1 ] && echo ', until the first failure')$([ "$REUSE" = 1 ] && echo ', reusing a booted VM between runs')"
+	for i in $(seq 1 "$p"); do (run_series "$i" "$p") & done
+	wait
+	# summary
+	read -r nok nbug nerr npanic noth nmatch secs < <(awk '{ c[$2]++; m += $3; s += $4 } END { printf "%d %d %d %d %d %d %d\n", c["OK"], c["BUG"], c["ERROR"], c["PANIC"], c["OTHER"], m, s }' "$SER/results")
+	n=$(wc -l <"$SER/results")
+	first=$(sort -n "$SER/results" | awk '$2 != "OK" { print; exit }')
+	keepts=$(echo "$first" | awk '{ print $5 }')
+	[ -n "$keepts" ] || keepts=$(sort -n "$SER/results" | tail -1 | awk '{ print $5 }')
+	if [ -z "$KEEP" ]; then
+		for f in "$RUN"/*"$LABEL-$TS"-r*; do
+			case $f in *"$keepts"*) ;; *) rm -f "$f" ;; esac
 		done
-		[ -s "$HLOG" ] && { say "---- host"; cat "$HLOG"; }
-		say "----"
 	fi
-	res=$(grep -a '^RESULT ' "$l" | tr -d '\r' | tail -1)
-	say "${res:-no RESULT line}"
-	after
-	exp=$(rv "EXPECT_$LABEL")
-	[ -n "$INSPECT" ] && exp=$(rv "EXPECT_INSPECT_$LABEL")
-	[ -n "$exp" ] || { say "CHECK: no expected result for '$LABEL'"; exit 0; }
-	case $res in
-	"$exp"*) say "CHECK OK: matches the expected '$exp'"; exit 0 ;;
-	*) say "CHECK FAILED: expected '$exp'"; exit 1 ;;
-	esac
+	rm -rf "$RUN"/.zr-"$LABEL-$TS"-r*
+	# enough matching runs: MIN_MATCH (a flaky reproducer's repro- image: at
+	# least that many failures); else every run, or with --until-fail on a
+	# repro- image, the run it stopped at
+	min=$(zv MIN_MATCH)
+	[ -n "$min" ] || { if [ "$UNTIL_FAIL" = 1 ] && [ "$LABEL" = repro ]; then min=1; else min=$NRUNS; fi; }
+	[ "$min" -gt "$NRUNS" ] && min=$NRUNS
+	say
+	sort -n "$SER/results" | awk '{ printf "  run %3d  %-5s %s %4ds  ", $1, $2, ($3 ? "match" : "     "), $4; for (i = 6; i <= NF; i++) printf "%s ", $i; print "" }'
+	say "SUMMARY $LABEL $(zv TAG): $n run(s): OK $nok, BUG $nbug, ERROR $nerr, PANIC $npanic, OTHER $noth; failure rate $(awk -v f=$((n - nok)) -v n="$n" 'BEGIN { printf "%.0f%%", n ? 100 * f / n : 0 }'); $(awk -v s="$secs" -v n="$n" 'BEGIN { printf "%.1f", n ? s / n : 0 }') s per run; $nmatch match '$(expected)' (need $min of $NRUNS)"
+	[ -n "$first" ] && say "first failing run: $first" && say "its logs: $RUN/*$keepts.serial0.log, *.serial1.log$([ -z "$KEEP" ] && echo ' (the other runs'"'"' logs and disks were discarded; --keep keeps them)')"
+	rm -rf "$SER"
+	[ "$MODE" = check ] || exit 0
+	if [ "$nmatch" -ge "$min" ] && { [ "$min" -lt "$NRUNS" ] || [ "$n" -ge "$NRUNS" ]; }; then
+		say "CHECK OK: $nmatch of $n run(s) matched (need $min)"; exit 0
+	fi
+	say "CHECK FAILED: $nmatch of $n run(s) matched '$(expected)' (need $min of $NRUNS)"; exit 1
 }
 
 interactive() {	# plain: this terminal on VM0; console: tmux with every VM and log
@@ -532,13 +665,21 @@ interactive() {	# plain: this terminal on VM0; console: tmux with every VM and l
 
 usage() {
 	cat <<'EOF'
-usage: IMAGE [LABEL] [--console | --check [--verbose]] [--dry-run]
-       IMAGE LABEL --disk /runs/FILE.raw... [--console | --check]
+usage: IMAGE [--console | --check [--verbose]] [--dry-run]
+       IMAGE [--check] --runs N [--until-fail] [--parallel P] [--keep]
+       IMAGE --disk /runs/FILE.raw... [--console | --check]
        IMAGE --info | --sources | --clean | --help
-LABEL is a build of the reproducer (usually bug or fix; --info lists them).
+The image is one build: repro-... (the break) or fixed-... (the fix branch).
 --console  tmux split: root shell(s) | kernel log + bash -x trace | host log | the script
 --check    boot, run the demo, wait for RESULT, power off; exit 0 if the RESULT
-           line is the expected one, 1 if not (--verbose prints the consoles)
+           line is the expected one, 1 if not (--verbose prints the consoles).
+           A flaky reproducer's --check does its RUNS runs (--info)
+--runs N   run the demo N times, each on a fresh boot and fresh run disks, and
+           print a summary (counts of RESULT OK/BUG/ERROR, panics, failure rate,
+           time per run).  With --check: exit 0 if enough runs matched (--info)
+--until-fail  stop at the first run that isn't RESULT OK
+--parallel P  P VMs at once (fewer if memory or CPUs are short)
+--keep     keep every run's logs and disks (default: only the first failing run's)
 --disk     re-attach run disks of an earlier run (a volume on /runs) and inspect them
 --dry-run  print the qemu command line(s) instead of running them
 --sources  print the SOURCES of the base and the reproducer (also in /sources)
@@ -550,13 +691,19 @@ EOF
 }
 
 main() {
-	MODE=plain INSPECT= LABEL= DRY=0 VERBOSE=
+	MODE=plain INSPECT= LABEL= DRY=0 VERBOSE= NRUNS= PARALLEL=1 UNTIL_FAIL=0 KEEP= BATCH=
 	if [ "${1:-}" = --attach ]; then loadenv "$2"; attach "$3"; exit 0; fi
 	while [ $# -gt 0 ]; do
 		case $1 in
 		--console) MODE=console ;;
 		--check) MODE=check ;;
 		--verbose) VERBOSE=1 ;;
+		--runs) shift; NRUNS=${1:-}; BATCH=1
+			case $NRUNS in '' | *[!0-9]* | 0) die "--runs needs a number" ;; esac ;;
+		--until-fail) UNTIL_FAIL=1 BATCH=1 ;;
+		--parallel) shift; PARALLEL=${1:-}; BATCH=1
+			case $PARALLEL in '' | *[!0-9]* | 0) die "--parallel needs a number" ;; esac ;;
+		--keep) KEEP=1 ;;
 		--dry-run) DRY=1 ;;
 		--info) info; exit 0 ;;
 		--sources) find /sources -type f | sort | while read -r f; do say "==> $f <=="; cat "$f"; say; done; exit 0 ;;
@@ -584,8 +731,20 @@ main() {
 		say "removed $n file(s) from $RUN"; exit 0
 	fi
 	[ -n "$INSPECT" ] && VMS=1 SHARED=0 NETWORK=0
+	# repeated runs (--runs; --check uses the image's RUNS when there is no --runs)
+	[ -n "$NRUNS" ] || { [ "$MODE" = check ] && NRUNS=$(zv RUNS); }
+	NRUNS=${NRUNS:-1}
+	[ "$NRUNS" -gt 1 ] && BATCH=1
+	if [ -n "$BATCH" ]; then
+		[ -n "$INSPECT" ] && die "--runs, --until-fail and --parallel don't go with --disk"
+		[ "$MODE" = console ] && die "--runs, --until-fail and --parallel run without a console (use --check, or no option)"
+		[ "$UNTIL_FAIL" = 1 ] && [ "$NRUNS" = 1 ] && NRUNS=100
+		[ "$MODE" = check ] || MODE=batch
+	fi
+	# a demo that can run again in the same VM (REPEAT_IN_VM=1) skips the reboot
+	REUSE=0; [ "$(rv REPEAT_IN_VM)" = 1 ] && [ ! -f "$R/host.sh" ] && [ "$VMS" = 1 ] && REUSE=1
 	[ "$MODE" = check ] && [ -n "$INSPECT" ] && [ ! -f "$R/inspect.sh" ] && die "--check --disk needs an inspect script, which this reproducer lacks"
-	if [ "$MODE" != check ] && [ "$DRY" = 0 ] && [ ! -t 0 ]; then
+	if [ "$MODE" != check ] && [ "$MODE" != batch ] && [ "$DRY" = 0 ] && [ ! -t 0 ]; then
 		die "no terminal for the VM's console: run with -it (podman run --rm -it ...), or use --check"
 	fi
 	# several VMs: the console view shows them all
@@ -598,7 +757,7 @@ main() {
 		rm -rf "$D"; exit 0
 	fi
 	case $MODE in
-	check) check ;;
+	check | batch) check ;;
 	*) interactive ;;
 	esac
 }

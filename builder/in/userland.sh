@@ -1,26 +1,26 @@
 #!/bin/bash
-# base-linux.sh NAME OUTDIR   (in the builder container, as root)
-# Packs a demo base: a minimal merged-/usr root from the builder's own
-# distribution (busybox, bash, a few GNU tools, util-linux dmesg, terminfo,
-# the shared libraries the OpenZFS tools need; no ZFS at all) and the kernel
-# $KERNEL installed in the builder image.  Writes to OUTDIR:
-#   base.qcow2   compressed qcow2 of the ext4 root (booted with root=/dev/vda)
-#   vmlinuz      the kernel, booted directly by qemu (no bootloader)
-#   initrd       only for kernels with virtio_blk/ext4 as modules
-#   files        every path in the root (reproducer images leave these out)
-#   base.conf    what the launcher needs (NAME OS KERNEL BOOT CMDLINE ...)
-#   SOURCES.txt  the packages every file came from, with their sources
+# userland.sh NAME OUTDIR   (in the userland builder container, as root)
+# Packs the shared userland: a minimal merged-/usr root from the builder's
+# own distribution (busybox, bash, a few GNU tools, util-linux dmesg,
+# terminfo, the shared libraries the OpenZFS tools need).  No kernel and no
+# ZFS: every Linux target (a kernel, kernel.sh) boots this same root, so the
+# image layer that holds it is shared by every target.  Writes to OUTDIR:
+#   base.qcow2     compressed qcow2 of the ext4 root (booted with root=/dev/vda)
+#   busybox        the static busybox, for the targets' initramfs (kernel.sh)
+#   files          every path in the root (reproducer disks leave these out)
+#   userland.conf  NAME DISTRO ZLIB SNAPSHOT
+#   SOURCES.txt    the packages every file came from, with their sources
 # busybox init runs /etc/rcS: API filesystems and tmpfs, then
-# /etc/demo-common.sh finds the reproducer disk by its serial, mounts it on
-# /demo, insmods the selected build's spl.ko/zfs.ko and links its tools;
-# `dmesg -w` goes to ttyS1 and a root bash runs on ttyS0.
+# /etc/demo-common.sh finds the demo disk and the build disk by their
+# serials, mounts them on /demo and /zfs, insmods the build's spl.ko and
+# zfs.ko and links its tools; `dmesg -w` goes to ttyS1 and a root bash runs
+# on ttyS0.
 set -euo pipefail
 NAME=${1:?name} O=${2:?outdir}
-K=${KERNEL:?KERNEL}
 IN=$(cd "$(dirname "$0")" && pwd)
 W=$(mktemp -d /tmp/base.XXXXXX) P=$W/root
 mkdir -p "$O" "$P"
-mkdir -p "$P"/{usr/bin,usr/sbin,usr/lib,usr/lib64,proc,sys,dev,tmp,var/tmp,run,root,etc/zfs,demo,mnt}
+mkdir -p "$P"/{usr/bin,usr/sbin,usr/lib,usr/lib64,proc,sys,dev,tmp,var/tmp,run,root,etc/zfs,demo,zfs,mnt}
 for d in bin sbin lib lib64; do ln -s usr/$d "$P/$d"; done
 chmod 1777 "$P/tmp" "$P/var/tmp"; chmod 700 "$P/root"
 : >"$W/owned"	# source paths copied into the root, for SOURCES.txt
@@ -64,6 +64,7 @@ zlibs="libblkid.so.1 libuuid.so.1 libudev.so.1 libz.so.1 libcrypto.so.3 libssl.s
 	[ "$r" = "$l" ] || { mkdir -p "$P$(dirname "$l")"; [ -e "$P$l" ] || ln -s "$r" "$P$l"; }
 done
 find "$P/usr/lib" "$P/usr/lib64" -type f -name '*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true
+find "$P/usr/bin" -type f ! -name busybox -exec strip --strip-unneeded {} + 2>/dev/null || true
 "$BB" --list-full | while read -r a; do
 	case $a in linuxrc) continue ;; esac
 	[ -e "$P/$a" ] || [ -L "$P/$a" ] || ln -s /usr/bin/busybox "$P/$a"
@@ -140,90 +141,24 @@ ZLIB=/usr/lib
 case $(readlink -f /lib64/ld-linux-x86-64.so.2 2>/dev/null) in */lib64/*) ZLIB=/usr/lib64 ;; esac
 echo "ZLIB=$ZLIB" >"$P/etc/demo-base.conf"
 
-# ---- kernel modules ---------------------------------------------------------
-# Kernels with virtio_blk and ext4 as modules get a small initramfs (busybox
-# /init: insmod them, switch_root to /dev/vda).  Ubuntu's generic kernel has
-# them built in.
-MD=/lib/modules/$K
-builtin() { sed 's|.*/||; s|\.ko.*$||; s|-|_|g' "$MD/modules.builtin" | grep -qx "${1//-/_}"; }
-modpath() { awk -F: -v n="${1//-/_}" '{ b = $1; sub(/.*\//, "", b); sub(/\.ko(\.[a-z]+)?$/, "", b); gsub(/-/, "_", b)
-	if (b == n) { print $1; exit } }' "$MD/modules.dep"; }
-SEEN=" "
-resolve() {
-	local m=${1//-/_} path d
-	builtin "$m" && return 0
-	case $SEEN in *" $m "*) return 0 ;; esac
-	path=$(modpath "$m"); [ -n "$path" ] || return 1
-	SEEN="$SEEN$m "
-	for d in $(awk -F': *' -v p="$path" '$1 == p { print $2 }' "$MD/modules.dep"); do
-		d=${d##*/}; resolve "${d%%.ko*}" || true
-	done
-	echo "$path"
-}
-unpack() {
-	case $1 in
-	*.xz) xz -dc "$MD/$1" >"$2" ;; *.zst) zstd -qdc "$MD/$1" >"$2" ;; *.gz) gzip -dc "$MD/$1" >"$2" ;;
-	*) cp "$MD/$1" "$2" ;;
-	esac
-}
-boot=()
-for m in virtio_pci virtio_blk ext4; do
-	builtin "$m" && continue
-	r=$(resolve "$m") || { echo "no module $m for $K" >&2; exit 1; }; boot+=($r)
-done
-rm -f "$O/initrd"
-if [ ${#boot[@]} -gt 0 ]; then
-	for m in crc32c_generic crc32c_intel; do r=$(resolve "$m") && boot+=($r) || true; done
-	boot=($(printf '%s\n' "${boot[@]}" | awk 'NF && !s[$0]++'))
-	echo "initramfs for: ${boot[*]}"
-	I=$W/initrd; mkdir -p "$I"/{bin,dev,proc,sys,newroot,lib/modules}
-	cp -L "$BB" "$I/bin/busybox"
-	i=10
-	for f in "${boot[@]}"; do
-		n=${f##*/}; n=$i-${n%%.ko*}.ko; i=$((i + 1))
-		unpack "$f" "$I/lib/modules/$n"; echo "$n" >>"$I/modules"
-	done
-	cat >"$I/init" <<'EOF'
-#!/bin/busybox sh
-/bin/busybox mount -t proc proc /proc
-/bin/busybox --install -s /bin
-mount -t sysfs sys /sys
-mount -t devtmpfs dev /dev
-for m in $(cat /modules); do insmod "/lib/modules/$m" || echo "initramfs: insmod $m failed"; done
-i=0; while [ ! -b /dev/vda ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
-mount -t ext4 -o rw /dev/vda /newroot || { echo "initramfs: cannot mount /dev/vda"; exec sh; }
-umount /proc /sys
-mount --move /dev /newroot/dev
-exec switch_root /newroot /sbin/init
-EOF
-	chmod 755 "$I/init"
-	(cd "$I" && find . | cpio -o -H newc --quiet) | gzip -9n >"$O/initrd"
-fi
-
 # ---- image ------------------------------------------------------------------
-cp "/boot/vmlinuz-$K" "$O/vmlinuz"
+cp -L "$BB" "$O/busybox"
 # a fixed time, owner and UUID: the same inputs give the same image
 export E2FSPROGS_FAKE_TIME=${SOURCE_DATE_EPOCH:-0}
 find "$P" -exec touch -h -d "@${SOURCE_DATE_EPOCH:-0}" {} +
 kb=$(du -sk --apparent-size "$P" | cut -f1)
-rm -f "$W/base.ext4"
-echo "base tree: ${kb} KiB"
+echo "userland tree: ${kb} KiB"
 truncate -s $(( (kb * 15 / 10 + 32768) * 1024 )) "$W/base.ext4"
 mkfs.ext4 -q -F -L zfsdemo -m 0 -N 4096 -O ^has_journal -U clear -E root_owner=0:0,hash_seed=00000000-0000-0000-0000-000000000000 -d "$P" "$W/base.ext4"
-qemu-img convert -q -c -f raw -O qcow2 "$W/base.ext4" "$O/base.qcow2"
+qemu-img convert -q -c -o compression_type=zlib -f raw -O qcow2 "$W/base.ext4" "$O/base.qcow2"
 (cd "$P" && find . | sed 's/^\.//' | sort) >"$O/files"
 q() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 {
 	echo "NAME=$(q "$NAME")"
-	echo "OS=Linux"
-	echo "KERNEL=$(q "$K")"
 	echo "DISTRO=$(q "$(. /etc/os-release; echo "$PRETTY_NAME")")"
-	echo "BOOT=kernel"
-	echo "CMDLINE='console=ttyS0,115200 loglevel=4 panic=0 root=/dev/vda rw rootfstype=ext4 init=/sbin/init'"
-	echo "RUN_DISK=gpt-zfs"
-	echo "INITRD=$([ -f "$O/initrd" ] && echo 1 || echo 0)"
+	echo "ZLIB=$(q "$ZLIB")"
 	echo "SNAPSHOT=$(q "${SNAPSHOT:-}")"
-} >"$O/base.conf"
+} >"$O/userland.conf"
 
 # ---- SOURCES.txt ------------------------------------------------------------
 owner() {
@@ -234,36 +169,26 @@ owner() {
 	done
 	echo -
 }
+sort -u "$W/owned" | while read -r f; do printf '%s\t%s\n' "$f" "$(owner "$f")"; done >"$W/owners"
 {
-	sort -u "$W/owned" | while read -r f; do printf '%s\t%s\n' "$f" "$(owner "$f")"; done
-	printf '/boot/vmlinuz-%s\tlinux-image-%s\n' "$K" "$K"
-	for f in "${boot[@]}"; do printf '%s\tlinux-modules-%s\n' "$MD/$f" "$K"; done
-} >"$W/owners"
-{
-	echo "SOURCES for the zfs-repro base $NAME"
+	echo "SOURCES for the zfs-repro userland $NAME (the kernel: the target's SOURCES.txt)"
 	echo
 	echo "Distribution: $(. /etc/os-release; echo "$PRETTY_NAME")"
-	echo "Kernel:       $K (source: https://launchpad.net/ubuntu/+source/linux/$(awk -F': ' '/^Version:/ { print $2 }' /boot/zfs-repro-kernel.pkg))"
 	echo "Packages:     the Ubuntu archive as of snapshot ${SNAPSHOT:-?}"
 	echo "              (https://snapshot.ubuntu.com/ubuntu/${SNAPSHOT:-})"
 	echo
 	echo "Packages that contributed files, with their source packages and where to get the source:"
 	echo
 	cut -f2 "$W/owners" | grep -v '^-$' | sort -u | while read -r p; do
-		if [ "$p" = "linux-image-$K" ]; then	# unpacked, not installed: the builder kept its control fields
-			v=$(awk -F': ' '/^Version:/ { v = $2 } /^Source:/ { s = $2 } END { split(s, a, " "); sv = a[2]; gsub(/[()]/, "", sv); printf "%s\t%s\t%s", v, a[1], (sv ? sv : v) }' /boot/zfs-repro-kernel.pkg)
-		else
-			v=$(dpkg-query -W -f='${Version}\t${source:Package}\t${source:Version}' "$p")
-		fi
-		IFS=$'\t' read -r pv sp sv <<<"$v"
+		IFS=$'\t' read -r pv sp sv <<<"$(dpkg-query -W -f='${Version}\t${source:Package}\t${source:Version}' "$p")"
 		echo "  $p $pv"
 		echo "      source: $sp $sv"
 		echo "      https://launchpad.net/ubuntu/+source/$sp/$sv"
 	done
 	echo
-	echo "Files written by builder/in/base-linux.sh (no package): /etc/rcS, /etc/inittab,"
+	echo "Files written by builder/in/userland.sh (no package): /etc/rcS, /etc/inittab,"
 	echo "/etc/shell, /etc/passwd, /etc/group, /etc/demo-common.sh, /etc/demo-base.conf,"
-	echo "/root/.bash_profile$([ -f "$O/initrd" ] && echo ", the initramfs /init")."
+	echo "/root/.bash_profile."
 	echo
 	echo "File by file (source path in the builder, package):"
 	sed 's/^/  /' "$W/owners"

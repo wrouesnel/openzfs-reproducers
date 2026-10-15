@@ -1,0 +1,14 @@
+# Builder for an Alpine target (linux-stable): its OpenZFS modules, and its
+# kernel in /kernel.
+ARG IMAGE
+FROM ${IMAGE}
+ARG KERNEL
+ARG APKVER
+COPY in/kernel-stage.sh /usr/local/bin/
+RUN apk add -q --no-cache build-base autoconf automake libtool gawk git bash python3 kmod \
+	xz zstd cpio file coreutils findutils elfutils-dev "linux-stable-dev=$APKVER" && \
+    mkdir -p /tmp/k/root /kernel && cd /tmp/k && apk fetch -q "linux-stable=$APKVER" && \
+    tar -C root -xzf linux-stable-*.apk 2>/dev/null; \
+    echo "linux-stable $APKVER linux-stable" >/kernel/pkg.txt && \
+    kernel-stage.sh "$KERNEL" /tmp/k/root "/usr/src/linux-headers-$KERNEL" "/usr/src/linux-headers-$KERNEL" && \
+    cd / && rm -rf /tmp/k

@@ -1,0 +1,6 @@
+# Layer 2, the userland: FROM the runtime, plus the root disk that every
+# Linux target boots (no kernel, no ZFS).
+ARG FROM
+FROM ${FROM}
+COPY base/ /zfs-repro/base/
+COPY SOURCES.txt /sources/userland/SOURCES.txt

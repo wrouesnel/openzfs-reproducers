@@ -1,26 +1,30 @@
 # demo-common.sh: boot-time logic shared by the Linux and FreeBSD demo bases
-# (vm/demo-images.md).  Installed as /etc/demo-common.sh and sourced by the
-# base's rc (busybox ash on Linux, sh on FreeBSD) after it has set:
+# (docs/reproducer-format.md).  Installed as /etc/demo-common.sh and sourced
+# by the base's rc (busybox ash on Linux, sh on FreeBSD) after it has set:
 #   OSNAME  SER1 (the second serial port)  ZSBIN ZLIB (where the build's
 #   tools and libraries are linked)  and the functions
 #   disk_list (candidate disks), serial_of DEV, mount_repro DEV DIR,
 #   run_dev DEV (the device a demo should use on run disk DEV),
 #   load_zfs BUILDDIR (loads the module, sets LOADED to a description of
 #   what is loaded and returns non-zero on a failure or a mismatch).
-# It finds the disks vm/demo-vm.sh attached by their virtio serials:
-#   zfsdemo-build-LABEL  the reproducer image, mounted read-only on /demo;
-#                        LABEL selects the build (/demo/LABEL) to load
+# It finds the disks the container's launcher attached by their serials:
+#   zfsdemo-demo         the demo (demo.sh, helpers, /manifest), on /demo
+#   zfsdemo-build-LABEL  the one OpenZFS build of this image (LABEL is repro
+#                        or fixed): build.txt, modules/, sbin/, lib/, on /zfs
 #   zfsdemo-runN         run disks for the demo (DEMO_DISKS, DEMO_DISK = first)
 #   zfsdemo-inspN        the same disks from an earlier run, to inspect
-# then loads the build, links its tools and libraries, and writes
-# /etc/demo-env, /etc/zfshunt-build, /etc/motd and root's bash history.
+# (Older images had one disk, zfsdemo-build-LABEL, with the demo and a
+# directory per build; that layout still loads.)  Then it loads the build,
+# links its tools and libraries, and writes /etc/demo-env, /etc/zfshunt-build,
+# /etc/motd and root's bash history.
 
 demo_setup() {
-	REPRO= BUILD= DEMO_MODE=none
+	REPRO= DEMOD= BUILD= DEMO_MODE=none
 	r0= r1= r2= r3= r4= r5= r6= r7= r8= r9=
 	for d in $(disk_list); do
 		s=$(serial_of "$d")
 		case $s in
+		zfsdemo-demo) DEMOD=$d ;;
 		zfsdemo-build-*) REPRO=$d BUILD=${s#zfsdemo-build-} ;;
 		zfsdemo-run[0-9]) eval "r${s#zfsdemo-run}=$(run_dev $d)"; DEMO_MODE=run ;;
 		zfsdemo-insp[0-9]) eval "r${s#zfsdemo-insp}=$(run_dev $d)"; DEMO_MODE=inspect ;;
@@ -29,13 +33,20 @@ demo_setup() {
 	DEMO_DISKS=$(echo $r0 $r1 $r2 $r3 $r4 $r5 $r6 $r7 $r8 $r9)
 	DEMO_DISK=${DEMO_DISKS%% *}
 	BUG=? warn= LOADED=
+	B=
 	if [ -z "$REPRO" ]; then
-		warn="no reproducer disk (serial zfsdemo-build-LABEL) attached"
-	elif ! mount_repro "$REPRO" /demo; then
-		warn="could not mount the reproducer disk $REPRO"
-	else
-		BUG=$(sed -n 's/^BUG=//p' /demo/manifest)
+		warn="no build disk (serial zfsdemo-build-LABEL) attached"
+	elif [ -n "$DEMOD" ]; then
+		mount_repro "$DEMOD" /demo || warn="could not mount the demo disk $DEMOD"
+		mkdir -p /zfs 2>/dev/null
+		mount_repro "$REPRO" /zfs && B=/zfs || warn="could not mount the build disk $REPRO"
+	elif mount_repro "$REPRO" /demo; then
 		B=/demo/$BUILD
+	else
+		warn="could not mount the reproducer disk $REPRO"
+	fi
+	if [ -n "$B" ]; then
+		BUG=$(sed -n 's/^ID=//p; s/^BUG=//p' /demo/manifest | head -1 | tr -d "'")
 		if [ ! -f "$B/build.txt" ]; then
 			warn="the reproducer image has no build '$BUILD'"
 		else
@@ -68,9 +79,9 @@ demo_setup() {
 	{
 		echo
 		if [ $DEMO_MODE = inspect ]; then
-			echo "=== zfshunt demo: bug $BUG, $BUILD build ($OSNAME), INSPECTING run disks ==="
+			echo "=== zfs-repro $BUG, $BUILD build ($OSNAME), INSPECTING run disks ==="
 		else
-			echo "=== zfshunt demo: bug $BUG, $BUILD build ($OSNAME) ==="
+			echo "=== zfs-repro $BUG, $BUILD build ($OSNAME) ==="
 		fi
 		[ -f /etc/zfshunt-build ] && sed 's/^/build:  /' /etc/zfshunt-build
 		echo "kernel: $(uname -sr)"

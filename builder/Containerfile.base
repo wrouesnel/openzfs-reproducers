@@ -1,7 +1,0 @@
-# A base system layer: FROM the runtime, plus one base's kernel and root disk.
-ARG RUNTIME
-FROM ${RUNTIME}
-ARG BASE_NAME
-COPY base/ /zfs-repro/base/
-COPY SOURCES.txt /sources/base/SOURCES.txt
-LABEL io.github.wrouesnel.zfs-repro.base="${BASE_NAME}"

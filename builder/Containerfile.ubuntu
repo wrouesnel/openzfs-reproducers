@@ -1,10 +1,13 @@
-# The build environment for a linux-ubuntu* base, its ZFS builds and its
-# reproducer images (builder/build.sh makes it; nothing here is published).
+# Builder for Ubuntu: the userland builder (KERNEL empty: the shared root
+# file system and every reproducer's OpenZFS userland tools) and the builder
+# of an Ubuntu target (KERNEL set: its OpenZFS modules, and its kernel in
+# /kernel).  builder/build.sh makes it; nothing here is published.
 ARG IMAGE
 FROM ${IMAGE}
 ARG SNAPSHOT
-ARG KERNEL
+ARG KERNEL=
 ENV DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8
+COPY in/kernel-stage.sh /usr/local/bin/
 # packages come from the Ubuntu snapshot service at SNAPSHOT (needs
 # ca-certificates first, from the image's own archive)
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates >/dev/null && \
@@ -16,10 +19,12 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-cert
 	libelf-dev libtirpc-dev libffi-dev libcurl4-openssl-dev libpam0g-dev python3 \
 	busybox-static bash util-linux bsdextrautils mawk binutils e2fsprogs cpio kmod \
 	xz-utils zstd qemu-utils diffutils findutils coreutils ncurses-base ncurses-term \
-	fdisk file \
-	"linux-headers-$KERNEL" "linux-modules-$KERNEL" >/dev/null && \
-    cd /tmp && apt-get download -qq "linux-image-$KERNEL" && \
-    dpkg -x linux-image-*.deb /tmp/kimg && cp /tmp/kimg/boot/vmlinuz-* /boot/ && \
-    dpkg-deb -f linux-image-*.deb Package Version Source >/boot/zfs-repro-kernel.pkg && \
-    rm -rf /tmp/kimg /tmp/*.deb /var/lib/apt/lists/* && \
-    depmod "$KERNEL" && ls -l "/boot/vmlinuz-$KERNEL" "/lib/modules/$KERNEL/modules.dep"
+	fdisk file ksh >/dev/null && \
+    if [ -n "$KERNEL" ]; then \
+	apt-get install -y -qq --no-install-recommends "linux-headers-$KERNEL" >/dev/null && \
+	mkdir -p /tmp/k /kernel && cd /tmp/k && \
+	apt-get download -qq "linux-image-$KERNEL" "linux-modules-$KERNEL" && \
+	for d in *.deb; do dpkg -x "$d" root; dpkg-deb -f "$d" Package Version Source | tr '\n' ' '; echo; done >/kernel/pkg.txt && \
+	kernel-stage.sh "$KERNEL" /tmp/k/root "/usr/src/linux-headers-$KERNEL" "/usr/src/linux-headers-$KERNEL" && \
+	cd / && rm -rf /tmp/k; \
+    fi && rm -rf /var/lib/apt/lists/*

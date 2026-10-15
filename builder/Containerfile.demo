@@ -1,0 +1,6 @@
+# Layer 4, a reproducer's demo: the same files for every target and build
+# (the layer's digest is the same in every image of the reproducer).
+ARG FROM
+FROM ${FROM}
+COPY repro/ /zfs-repro/repro/
+COPY sources/ /sources/repro/

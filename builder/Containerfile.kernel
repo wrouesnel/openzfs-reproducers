@@ -1,0 +1,6 @@
+# Layer 3, a target: FROM the userland, plus one kernel (vmlinuz, initrd)
+# and the base.conf the launcher boots it with.
+ARG FROM
+FROM ${FROM}
+COPY base/ /zfs-repro/base/
+COPY SOURCES.txt /sources/kernel/SOURCES.txt

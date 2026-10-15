@@ -1,0 +1,14 @@
+# Builder for a Debian target: its OpenZFS modules, and its kernel in /kernel.
+ARG IMAGE
+FROM ${IMAGE}
+ARG KERNEL
+ENV DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8
+COPY in/kernel-stage.sh /usr/local/bin/
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends build-essential autoconf automake libtool \
+	gawk pkg-config git ca-certificates python3 kmod xz-utils zstd cpio file \
+	"linux-headers-$KERNEL" >/dev/null && \
+    mkdir -p /tmp/k /kernel && cd /tmp/k && apt-get download -qq "linux-image-$KERNEL" && \
+    for d in *.deb; do dpkg -x "$d" root; dpkg-deb -f "$d" Package Version Source | tr '\n' ' '; echo; done >/kernel/pkg.txt && \
+    kernel-stage.sh "$KERNEL" /tmp/k/root "/usr/src/linux-headers-${KERNEL%-amd64}-common" "/usr/src/linux-headers-$KERNEL" && \
+    cd / && rm -rf /tmp/k /var/lib/apt/lists/*

@@ -1,0 +1,25 @@
+# Daily: point the PR and issue alias tags (repro-prN-..., fixed-issueN-...)
+# at the published images whose branch a PR now heads or an issue names
+# (scripts/aliases.py).  build.yml does the same after each push to main.
+name: aliases
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  aliases:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ZFS_REPRO_IMAGE: ghcr.io/${{ github.repository_owner }}/openzfs-reproducers
+        run: |
+          echo "$GITHUB_TOKEN" | skopeo login ghcr.io -u '${{ github.actor }}' --password-stdin
+          python3 -I scripts/aliases.py

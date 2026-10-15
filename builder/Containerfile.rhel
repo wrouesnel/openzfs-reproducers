@@ -1,0 +1,18 @@
+# Builder for an AlmaLinux (RHEL) or Fedora target: its OpenZFS modules,
+# and its kernel in /kernel.  KERNEL_RPMS are the kernel's packages by URL
+# (kernel-core[, kernel-modules-core], kernel-devel).
+ARG IMAGE
+FROM ${IMAGE}
+ARG KERNEL
+ARG KERNEL_RPMS
+COPY in/kernel-stage.sh /usr/local/bin/
+RUN mkdir -p /tmp/k/root /kernel && cd /tmp/k && \
+    for u in $KERNEL_RPMS; do curl -fsSLO "$u" || exit 1; done && \
+    dnf -y -q install --setopt=install_weak_deps=False gcc make autoconf automake libtool \
+	gawk git python3 kmod xz zstd cpio file diffutils elfutils-libelf-devel ./kernel-devel-*.rpm >/dev/null && \
+    for r in kernel-core-*.rpm kernel-modules-core-*.rpm; do [ -f "$r" ] || continue; \
+	(cd root && rpm2cpio "../$r" | cpio -idm --quiet) || exit 1; \
+	rpm -qp --qf '%{NAME} %{VERSION}-%{RELEASE} %{SOURCERPM}\n' "$r"; done >/kernel/pkg.txt && \
+    rpm -q --qf '%{NAME} %{VERSION}-%{RELEASE} %{SOURCERPM}\n' kernel-devel >>/kernel/pkg.txt && \
+    kernel-stage.sh "$KERNEL" /tmp/k/root "/usr/src/kernels/$KERNEL" "/usr/src/kernels/$KERNEL" && \
+    cd / && rm -rf /tmp/k && dnf clean all -q

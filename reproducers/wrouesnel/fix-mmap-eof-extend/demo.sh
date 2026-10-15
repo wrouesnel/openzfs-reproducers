@@ -18,10 +18,10 @@
 # disk after a remount.
 #
 # Builds (reproducer.conf):
-#   bug: the PR's test commit, without the fix
+#   repro: the PR's test commit, without the fix
 #     -> each line shows "53 54 41 4c 45 2d 44 41 54 41  STALE-DATA",
 #        both after extending and after the remount,  "RESULT BUG"
-#   fix: the PR's fix commit
+#   fixed: the PR's fix commit
 #     -> every line shows "00 00 00 00 00 00 00 00 00 00", "RESULT OK"
 # Pool demo27 on the run disk $DEMO_DISK, or on the file /var/tmp/demo27/vdev
 # when DEMO_DISK is unset.  It is exported at the end, not destroyed, so the

@@ -1,0 +1,6 @@
+# Layer 5, one OpenZFS build (repro or fixed) for one target: the tools and
+# the modules.  Labels come from builder/build.sh.
+ARG FROM
+FROM ${FROM}
+COPY build/ /zfs-repro/build/
+COPY sources/ /sources/build/
