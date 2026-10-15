@@ -55,7 +55,10 @@ tagsafe() { printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'; }
 kver() { tagsafe "$(tconf "$1" KERNEL)"; }
 idtag() { printf '%s' "${1//\//-}"; }	# USER/SLUG -> USER-SLUG
 
-all_ids() { (cd "$T/reproducers" && for d in */*/reproducer.conf; do echo "${d%/reproducer.conf}"; done); }
+all_ids() {	# every reproducer, or only ONLY_IDS (space separated) when set
+	(cd "$T/reproducers" && for d in */*/reproducer.conf; do echo "${d%/reproducer.conf}"; done) |
+	    if [ -n "${ONLY_IDS:-}" ]; then grep -xF -f <(printf '%s\n' $ONLY_IDS); else cat; fi
+}
 all_targets() { (cd "$T/bases" && for d in */base.conf; do echo "${d%/base.conf}"; done); }
 linux_targets() { local t; for t in $(all_targets); do [ "$(tconf "$t" OS)" = Linux ] && [ "$(tarch "$t")" = x86_64 ] && echo "$t"; done; }
 targets_of() {	# the targets a reproducer is built for

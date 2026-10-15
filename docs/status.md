@@ -15,7 +15,7 @@ build commit is reachable from the branch it names on GitHub).
 | wrouesnel/fix-partial-read-redirty-v2 | (v2 of #19299) | master c27dff0c3 | head 2d2cd4ca8 | 22 |
 | wrouesnel/fix-hasrecvd-spa-open | PR #19306, issue #16988 | test 698970748 | head c99f45c9a | 32 |
 | wrouesnel/fix-dos-readonly-open | PR #19313 | test 9b812a240 | head 2f9098489 | 39 |
-| wrouesnel/fix-dyn-gang-header-import | PR #19314, issue #19189 | test cf9719c6e | head d60260002 | 40 (Linux port + FreeBSD 15.1 disk) |
+| wrouesnel/fix-dyn-gang-header-import | PR #19314, issue #19189 | test 388a0de5d | head 00d906b32 (v2, force-pushed 2026-10-15) | 40 (Linux port) |
 | wrouesnel/fix-dio-nopwrite-freed | PR #19336 | test ffd2b7540 | head 0c8fc6619 | 57 (release build) |
 | wrouesnel/fix-snapdir-expire-stat | issue #19215 | test 17919a929 | head 6fde83e8f | 62 |
 | wrouesnel/fix-resilver-detached-target | issues #13679, #16001 | test 129bc1125 | head c2451409c | 69 |
@@ -77,8 +77,13 @@ can't be built here yet; each has a demo in zfs-bug-hunt:
   FreeBSD from the CI images (`vm/mkdemo-base.sh`), imported with
   `scripts/freebsd-image.sh target`.
 - wrouesnel/fix-dyn-gang-header-import on freebsd15-1r: the FreeBSD disk built
-  on b-freebsd15-1r from the PR commits (cf9719c6e, d60260002), checked
-  locally: repro RESULT BUG (+ inspect BUG), fixed RESULT OK (+ inspect OK).
+  on b-freebsd15-1r from the PR's first commits (cf9719c6e, d60260002) was
+  wrapped and checked locally (repro RESULT BUG + inspect BUG, fixed RESULT OK
+  + inspect OK), which proved the FreeBSD path end to end. The branch was
+  then force-pushed to v2 (388a0de5d, 00d906b32), so those commits aren't
+  public any more and the disk isn't published; it needs a rebuild on
+  b-freebsd15-1r from v2 (`vm/mkdemo.sh 40@freebsd-15.1 b-freebsd15-1r
+  bug=388a0de5d fix=00d906b32`), then `LOCAL_TARGETS='freebsd15-1r'`.
 - Building FreeBSD disks in CI: GitHub has no FreeBSD runners; a FreeBSD VM
   action (vmactions/freebsd-vm, cross-platform-actions) could run the
   OpenZFS build and makefs, but the GENERIC kernel's module build needs the

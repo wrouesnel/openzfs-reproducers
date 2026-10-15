@@ -35,7 +35,15 @@ jobs:
       - name: The builds' commits are public
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: for id in $(builder/build.sh ids); do builder/build.sh verify "$id"; done
+        run: |
+          # a reproducer whose commits aren't public (any more: a force-push)
+          # is left out of this run, with a warning
+          ok=
+          for id in $(builder/build.sh ids); do
+            if builder/build.sh verify "$id"; then ok="$ok $id"
+            else echo "::warning::$id left out: its build commits are not reachable from its branch"; fi
+          done
+          echo "ONLY_IDS=$ok" >>"$GITHUB_ENV"
       - id: plan
         run: |
           plan=$(builder/build.sh plan)
