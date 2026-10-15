@@ -5,6 +5,8 @@
 #   ghcr.io/wrouesnel/openzfs-reproducers:fixed-USER-SLUG-TARGET-KERNEL
 # The steps are builder/build.sh's, so the same build runs locally.  Every
 # output is cached by what it is made of (builder/build.sh key ...).
+# max-parallel keeps this workflow to a few runners at a time: GitHub's job
+# concurrency is per account, and the account's openzfs fork CI needs it too.
 name: build
 
 on:
@@ -68,6 +70,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.plan).targets }}
     steps:
@@ -98,6 +101,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.plan).zfs }}
     steps:
@@ -132,6 +136,7 @@ jobs:
       packages: write
     strategy:
       fail-fast: false
+      max-parallel: 5
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.plan).jobs }}
     env:
