@@ -1,0 +1,51 @@
+# Delete old tags from ghcr.io (the package versions that carry only those
+# tags), once their replacements are published.  Run by hand:
+#   gh workflow run retire-tags.yml -f tags='pr19267 selftest-triggers' -f require='repro-wrouesnel-fix-mmap-eof-extend-ubuntu24-6.8.0-142-generic'
+# It first pulls every REQUIRE tag anonymously, and refuses to delete a
+# version that also carries a tag it wasn't asked to delete.
+name: retire-tags
+
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: 'tags to delete (space separated)'
+        required: true
+      require:
+        description: 'tags that must be anonymously pullable first (space separated)'
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  retire:
+    runs-on: ubuntu-24.04
+    env:
+      PKG: openzfs-reproducers
+      GH_TOKEN: ${{ github.token }}
+      TAGS: ${{ inputs.tags }}
+      REQUIRE: ${{ inputs.require }}
+    steps:
+      - name: The replacements are published (anonymous pull)
+        run: |
+          for t in $REQUIRE; do
+            skopeo inspect --no-creds "docker://ghcr.io/${{ github.repository_owner }}/$PKG:$t" >/dev/null || { echo "::error::$t is not pullable"; exit 1; }
+            echo "ok: $t"
+          done
+      - name: Delete
+        run: |
+          owner=${{ github.repository_owner }}
+          gh api --paginate "/users/$owner/packages/container/$PKG/versions" \
+              --jq '.[] | [.id, (.metadata.container.tags | join(" "))] | @tsv' |
+          while IFS=$'\t' read -r id tags; do
+            hit= other=
+            for t in $tags; do
+              case " $TAGS " in *" $t "*) hit="$hit $t" ;; *) other="$other $t" ;; esac
+            done
+            [ -n "$hit" ] || continue
+            if [ -n "$other" ]; then echo "keeping version $id: it also has$other"; continue; fi
+            echo "deleting version $id ($tags)"
+            gh api -X DELETE "/users/$owner/packages/container/$PKG/versions/$id"
+          done

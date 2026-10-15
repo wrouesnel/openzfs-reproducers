@@ -1,25 +1,38 @@
 # The reproducer format
 
-Each reproducer is a directory `reproducers/<id>/`. CI builds it into the
-image `ghcr.io/wrouesnel/openzfs-reproducers:<id>`. The id names the upstream
-reference, for example `pr19267` for openzfs/zfs#19267.
+Each reproducer is a directory `reproducers/USER/SLUG/`, named after the fix
+branch it is built from: USER is the GitHub owner of the repository the
+branch is fetched from (lowercase; `wrouesnel` for github.com/wrouesnel/zfs,
+`openzfs` for an upstream branch), SLUG the branch name slugified (lowercase,
+every run of characters other than `a-z0-9` becomes `-`, no leading or
+trailing `-`). CI builds two images of it for every target:
+
+- `repro-USER-SLUG-TARGET-KERNEL`: the break (`BUILD_repro`), which must print
+  `EXPECT_repro`;
+- `fixed-USER-SLUG-TARGET-KERNEL`: the fix (`BUILD_fixed`), which must print
+  `EXPECT_fixed`;
+
+and publishes them, as a pair, for the targets where both do.
 
 | file | what it is |
 |---|---|
-| `reproducer.conf` | metadata, builds, expected results and VM settings (below) |
+| `reproducer.conf` | metadata, the two builds, expected results and VM settings (below) |
 | `demo.sh` | the demo, run in the VM as root (bash). It prints one `RESULT ...` line |
 | `inspect.sh` | optional: re-reads a run disk that an earlier run left, and prints `RESULT ... on disk` |
-| `*.c` | optional helpers, compiled in the builder and installed as `/demo/<name>` |
-| `bins` | optional: extra programs from the builder's distribution (`NAME` or `NAME=SOURCE`), installed in `/demo/bin` |
-| `prep.sh` | optional: `bash prep.sh ROOT` runs in the builder on the reproducer disk's tree before the library scan |
+| `*.c` | optional helpers, compiled in the userland builder and installed as `/demo/<name>` |
+| `bins` | optional: extra programs from the userland builder's distribution (`NAME` or `NAME=SOURCE`), installed in `/demo/bin` |
+| `prep.sh` | optional: `bash prep.sh ROOT` runs in the builder on the demo disk's tree before the library scan |
 | `host.sh` | optional: host-side triggers, run by the orchestrator in the container (see "External triggers") |
+| anything else | copied to the demo disk as it is (data files, ZTS scripts, ...) |
 
-The reproducer disk is ext4 and is mounted read-only on `/demo` in the VM. It
-holds the demo files, `/demo/bin/zr` (the guest side of the host channel) and
-one directory per build (`/demo/<label>/`) with that build's `zfs.ko` and
-`spl.ko`, `zpool`, `zfs`, `zdb` and its libraries. At boot the base loads the
-build that the container selected, links its tools into `/usr/sbin`, and
-writes the motd and the shell history, so that Up, Enter runs the demo.
+The demo disk is ext4 and is mounted read-only on `/demo` in the VM. It holds
+the demo files and `/demo/bin/zr` (the guest side of the host channel). It is
+the same for every target and both builds. The build disk is mounted on `/zfs`:
+that build's `zfs.ko` and `spl.ko` for the target's kernel, `zpool`, `zfs`,
+`zdb`, `zinject`, `zhack`, `zstream` (and `TOOLS`) and its libraries. At boot
+the userland loads the modules, links the tools into `/usr/sbin`, and writes
+the motd and the shell history, so that Up, Enter runs the demo.
+`DEMO_BUILD` (in the demo's environment) is `repro` or `fixed`.
 
 ## reproducer.conf
 
@@ -29,14 +42,20 @@ read them.
 | key | meaning |
 |---|---|
 | `TITLE` | one line: what goes wrong |
-| `PRS`, `ISSUES` | upstream openzfs/zfs PR and issue numbers (space separated). **Only public ones**: this repository publishes nothing about bugs that aren't already public upstream |
-| `BRANCH` | optional: where the fix branch lives (a URL) |
-| `BASE` | the base system, `bases/<BASE>/base.conf` (`linux-ubuntu24`) |
-| `BUILDS` | the build labels, normally `bug fix`. The first is the default |
-| `BUILD_<label>` | `REPO@SHA`, for example `https://github.com/openzfs/zfs@c8b07a0...` (full 40-hex sha; the commit must be reachable from a ref of REPO, such as a PR head) |
-| `CONFIGURE` | OpenZFS configure arguments for every build (usually `--enable-debug`) |
-| `EXPECT_<label>` | the start of the `RESULT` line that build must print. `--check` and CI compare it |
-| `EXPECT_INSPECT_<label>` | the same for `inspect.sh` on that build's run disk |
+| `REPO`, `BRANCH` | the fix branch: `https://github.com/USER/zfs` and the branch name (its slug is the directory name) |
+| `AUTHOR`, `REPORTER` | who wrote the fix (`@handle`) and who reported the bug (`@handle` or an issue); shown by `--info` and in the labels |
+| `PRS`, `ISSUES` | optional openzfs/zfs PR and issue numbers (space separated): metadata, and hints for the alias tags (`scripts/aliases.py` also finds them itself) |
+| `BUILD_repro` | the break: `REPO@SHA` (full 40-hex sha). Usually the branch's test commit (the test without the fix) or the openzfs/zfs master commit the branch is based on |
+| `BUILD_fixed` | the fix: `REPO@SHA`, the branch head. Leave it out for a self-test with nothing to fix |
+| `CONFIGURE` | OpenZFS configure arguments for both builds (usually `--enable-debug`) |
+| `TOOLS` | more programs for the build disk: OpenZFS tools (`zgenhostid`, `zed`, ...) or ZTS helpers (`file_write`, ...) |
+| `EXPECT_repro`, `EXPECT_fixed` | the start of the `RESULT` line each build must print (`PANIC` matches a kernel panic). `--check` and CI compare it |
+| `EXPECT_INSPECT_repro`, `EXPECT_INSPECT_fixed` | the same for `inspect.sh` on that build's run disk |
+| `RUNS_repro`, `RUNS_fixed` | a flaky reproducer: how many runs `--check` does (default 1) |
+| `MIN_MATCH_repro`, `MIN_MATCH_fixed` | how many of those runs must match the expectation (default: all). For a flake, `MIN_MATCH_repro=1` with `RUNS_repro=20` means "the break fails at least once in 20 runs", and `RUNS_fixed=20` means "the fix passes 20 of 20" |
+| `REPEAT_IN_VM` | `1`: `--runs` may run the demo again in the same booted VM (the demo recreates its pool), rebooting only after a panic |
+| `TARGETS`, `SKIP_TARGETS` | the targets to build for (default: every x86_64 Linux target), and ones to leave out |
+| `LOCAL_TARGETS` | targets built outside CI, for example FreeBSD (`scripts/freebsd-image.sh`) |
 | `MEM`, `CPUS`, `TIMEOUT` | VM memory (MiB), vCPUs, and seconds to wait for RESULT |
 | `DISKS`, `DISK_SIZE` | the number of sparse run disks per VM (or shared), and their size (`1G`) |
 | `VMS` | the number of VMs (default 1). VM0 runs the demo. The others boot to a prompt and act only when typed at (host.sh `vm_type`) |
@@ -45,12 +64,29 @@ read them.
 | `HOSTIDS` | one hex hostid per VM, set by `zr setup` (`/etc/hostid` and `spl_hostid`) |
 | `RESULT_VM` | the VM whose console carries the RESULT line (default 0) |
 
+Every commit must be public: CI runs `builder/build.sh verify ID`, which asks
+GitHub whether each `BUILD_*` commit is reachable from `BRANCH` on its
+repository (or from master on openzfs/zfs).
+
+### Repeated runs (flaky bugs)
+
+`--runs N` runs the demo N times, each on a fresh boot with fresh run disks
+(or, with `REPEAT_IN_VM=1`, in the same VM), `--parallel P` runs P VMs at a
+time (fewer if memory or CPUs are short), `--until-fail` stops at the first
+run that isn't `RESULT OK`. Each run is classified OK, BUG, ERROR (`RESULT
+ERROR` or no RESULT), PANIC or OTHER, and the summary gives the counts, the
+failure rate and the time per run; the first failing run's logs are kept,
+the others' are discarded unless `--keep`. With `--check`, the exit status is
+0 when at least `MIN_MATCH` runs matched the image's expectation. Reproducers
+with triggers (`host.sh`) work the same way: every run boots its own VMs.
+
 ### The VM
 
-- **Linux bases:** the kernel boots directly; busybox init runs a root bash on
+- **Linux targets:** the kernel boots directly; busybox init runs a root bash on
   serial0. There is no udev. Run disks get a GPT with one partition, and
-  `DEMO_DISK` / `DEMO_DISKS` name the partitions (`/dev/vdc1 ...`; `vda` is
-  the base and `vdb` the reproducer disk). The serial of run disk N is
+  `DEMO_DISK` / `DEMO_DISKS` name the partitions (`/dev/vdd1 ...`; `vda` is
+  the root, `vdb` the demo disk and `vdc` the build disk). Use the variables,
+  not the names. The serial of run disk N is
   `zfsdemo-runN`, so a demo can find a disk again after a replug
   (`/sys/block/vd*/serial`).
 - Serial ports: ttyS0 is the root shell. ttyS1 gets the kernel log, plus the
@@ -132,7 +168,8 @@ your typed command prints, quote part of it in the typed text
 - `--check` boots every VM, presses Up, Enter on VM0, and waits for a RESULT
   line (or a kernel panic) on `RESULT_VM`'s console. It doesn't give up while
   a trigger runs, so power cuts and reboots are fine. Then it powers every VM
-  off and exits 0 if the RESULT matches `EXPECT_<label>`, or 1 if it doesn't.
+  off and exits 0 if the RESULT matches the image's `EXPECT_repro` or
+  `EXPECT_fixed`, or 1 if it doesn't (with `RUNS`: enough runs matched).
   `--verbose` prints every console and the host log.
 - Interactive (`-it`) runs the same orchestrator. One VM: your terminal is
   VM0's console (Ctrl-] leaves). Several VMs, or `--console`: tmux with a pane
@@ -142,7 +179,8 @@ your typed command prints, quote part of it in the typed text
 
 ### Example
 
-`reproducers/selftest-triggers/` is not a bug. It uses every kind of trigger:
+`reproducers/wrouesnel/selftest-triggers/` is not a bug (it has only a
+`repro-` image, which expects `RESULT OK`, and is built for ubuntu24 only). It uses every kind of trigger:
 two VMs sharing two disks over a private link, a throttle, EIO injection, a
 hot-unplug and replug, a pause, a power cut that the demo survives (`zr
 phase`), a host-side overwrite that a scrub repairs, an import on the other VM
@@ -151,19 +189,30 @@ trigger path keeps working before any published reproducer needs it.
 
 ## Adding a reproducer
 
-1. The bug must be public upstream (an open or merged openzfs/zfs PR or issue).
-2. Create `reproducers/<id>/` with the files above, with the builds pinned by
-   full sha.
-3. `builder/build.sh all <id>` builds and checks it locally (podman, KVM),
-   and CI does the same on the pull request.
-4. On merge to main, CI pushes `ghcr.io/wrouesnel/openzfs-reproducers:<id>`.
+1. Push the fix branch (the test commit, then the fix) to a public GitHub
+   repository, for example github.com/wrouesnel/zfs.
+2. Create `reproducers/USER/SLUG/` with `reproducer.conf` (`REPO`, `BRANCH`,
+   `BUILD_repro`, `BUILD_fixed` by full sha, the expected RESULT lines and the
+   VM settings) and `demo.sh`. Someone else's branch works the same way: USER
+   is their GitHub name, `AUTHOR` credits them, and the demo can be ours.
+3. `builder/build.sh verify USER/SLUG` checks the commits are public;
+   `builder/build.sh all USER/SLUG ubuntu24` builds and checks it locally.
+4. Open a pull request: CI builds and checks every target. On merge to main,
+   CI pushes the pairs where the break reproduces and the fix passes, and the
+   results land in its `results-matrix` artifact (copied to docs/results.md).
+5. When the branch gets an upstream PR, nothing needs to change: the alias job
+   finds it and tags the images `repro-prN-...` / `fixed-prN-...` once the PR's
+   head is the commit that was built. If the head moves, update `BUILD_fixed`.
 
-## Bases
+## Targets and the userland
 
-`bases/<name>/base.conf` pins the builder (Ubuntu image digest, a
-snapshot.ubuntu.com date and the kernel package), so a rebuild gets the same
-package versions. `builder/in/base-linux.sh` packs the base. Its
-`SOURCES.txt`, which lists every file's package and source, ships in the image
-at `/sources/base/SOURCES.txt`.
-
-FreeBSD bases aren't built in CI yet. See the README.
+`bases/TARGET/base.conf` is a target: a kernel. `FAMILY` picks the builder
+(`builder/Containerfile.FAMILY`: ubuntu, debian, rhel, fedora, alpine),
+`IMAGE` pins the distribution's container image by digest, and `KERNEL`
+(with `SNAPSHOT`, `KERNEL_RPMS` or `APKVER`) pins the kernel. The builder
+fetches the kernel package, keeps the vmlinuz and the few modules the VM needs
+(`builder/in/kernel-stage.sh`), and has the headers the OpenZFS modules are
+built against. `builder/in/kernel.sh` packs the kernel and, if virtio or ext4
+aren't built in, an initramfs. `userlands/NAME/userland.conf` is the root file
+system every Linux target of that architecture boots
+(`builder/in/userland.sh`). See docs/targets.md.
