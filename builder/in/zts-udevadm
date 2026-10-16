@@ -1,0 +1,20 @@
+#!/bin/bash
+# udevadm for the ZTS reproducers' VM, which has no udev: any call makes the
+# /dev/zvol links that OpenZFS's udev rules would (zvol/NAME -> zdN, and
+# zvol/NAME-partM -> zdNpM for partitions), drops links whose zvol is gone,
+# and succeeds.  `udevadm info` prints nothing.  The ZTS runner also runs it
+# in a loop, since udev would make the links without being asked.
+[ "${1:-}" = info ] && exit 0
+mkdir -p /dev/zvol
+for d in /dev/zd*; do
+	[ -b "$d" ] || continue
+	case ${d#/dev/} in
+	*p[0-9]*) n=$(zvol_name "${d%p*}") || continue; l=/dev/zvol/$n-part${d##*p} ;;
+	*) n=$(zvol_name "$d") || continue; l=/dev/zvol/$n ;;
+	esac
+	[ "$(readlink "$l")" = "$d" ] && continue
+	mkdir -p "${l%/*}"; ln -sfn "$d" "$l"
+done
+find /dev/zvol -type l ! -exec test -e {} \; -delete 2>/dev/null
+find /dev/zvol -mindepth 1 -type d -empty -delete 2>/dev/null
+exit 0

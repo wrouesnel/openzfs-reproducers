@@ -13,6 +13,7 @@ done
 W=$(mktemp -d /tmp/build.XXXXXX) R=$W/root
 mkdir -p "$R" "$O"
 cp -R "$U/sbin" "$U/lib" "$R/"
+[ -d "$U/zed" ] && cp -R "$U/zed" "$R/"	# zed.rc and the zedlets (TOOLS zed)
 cp -R "$M/modules" "$R/"
 cp "$M/build.txt" "$R/build.txt"
 [ "$(head -1 "$U/build.txt")" = "$(head -1 "$M/build.txt")" ] ||

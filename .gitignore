@@ -5,3 +5,4 @@ work/
 *.vmlinuz
 *.initrd
 /runs/
+__pycache__/

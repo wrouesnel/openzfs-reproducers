@@ -64,7 +64,13 @@ if [ "$MODE" = user ]; then
 	L=$S/usr/lib
 	for f in "$Kp"/sbin/*; do LD_LIBRARY_PATH=$L ldd "$f" 2>/dev/null | grep -o '/[^ ]*' || true; done |
 	    grep "^$L/" | sort -u | while read -r l; do cp -L "$l" "$Kp/lib/${l##*/}"; done
-	file "$Kp"/sbin/* "$Kp"/lib/* | grep -q ELF
+	# zed (TOOLS): its zed.rc and zedlets too, for ZTS's zed_setup
+	if [ -x "$Kp/sbin/zed" ] && [ -d "$S/etc/zfs/zed.d" ]; then
+		mkdir -p "$Kp/zed"
+		cp -a "$S/etc/zfs/zed.d" "$Kp/zed/etc"
+		cp -a "$S/usr/libexec/zfs/zed.d" "$Kp/zed/libexec"
+	fi
+	file "$Kp"/sbin/* "$Kp"/lib/* | grep ELF >/dev/null	# (not -q: with pipefail, file would get SIGPIPE)
 	strip --strip-unneeded "$Kp"/sbin/* "$Kp"/lib/* 2>/dev/null || true
 	echo "$marker" >"$Kp/build.txt"
 else

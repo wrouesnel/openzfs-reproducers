@@ -1,0 +1,23 @@
+#!/bin/sh
+# sudo for ZTS in the demo VM (no sudo, no sudoers; the demo runs as root):
+# the forms ZTS uses, `sudo [-E] [-u USER|-u '#UID'] CMD...` (libtest's
+# user_run, the zoned_uid tests), run CMD as that user with setpriv.
+u=
+while [ $# -gt 0 ]; do
+	case $1 in
+	-E) ;;
+	-u | -Eu) u=$2; shift ;;
+	--) shift; break ;;
+	-*) echo "sudo (demo): unsupported option $1" >&2; exit 1 ;;
+	*) break ;;
+	esac
+	shift
+done
+[ -n "$u" ] || exec "$@"
+# util-linux's setpriv (on /demo/bin): busybox's shell would run its own
+# applet, which lacks --reuid
+P=/demo/bin/setpriv; [ -x "$P" ] || P=setpriv
+case $u in
+'#'*) exec "$P" --reuid="${u#\#}" --regid="${u#\#}" --clear-groups "$@" ;;
+*) exec "$P" --reuid="$(id -u "$u")" --regid="$(id -g "$u")" --init-groups "$@" ;;
+esac

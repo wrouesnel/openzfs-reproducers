@@ -63,6 +63,12 @@ read them.
 | `NETWORK` | `1`: a private point-to-point link between VM0 and VM1 (`VMS=2`), `10.99.0.1` and `10.99.0.2` after `zr setup`. There is no other network |
 | `HOSTIDS` | one hex hostid per VM, set by `zr setup` (`/etc/hostid` and `spl_hostid`) |
 | `RESULT_VM` | the VM whose console carries the RESULT line (default 0) |
+| `KIND` | `zts`: a ZTS reproducer, see "ZTS reproducers" below (no demo.sh needed) |
+| `ZTS_TESTS` | `KIND=zts`: the tests to run, as `tests/functional/GROUP/NAME` (space separated) |
+| `ZTS_SCRIPTS` | `KIND=zts`: `fixed` runs the fix head's test scripts on both builds (the break has no test of its own); default: each build runs its own commit's |
+| `ZTS_ITERATIONS` | `KIND=zts`: how many times one demo runs the tests (a flake: `RESULT BUG` if any run fails) |
+| `BLOCKED` | why this reproducer doesn't show its bug yet (docs/coverage.md): `builder/build.sh ids` and CI leave it out (`WITH_BLOCKED=1` includes it) |
+| `EXTRA_PKGS` | packages of the userland builder's distribution (at its snapshot) to unpack on the demo disk: their programs on `/demo/bin`, their libraries on `/demo/lib` |
 
 Every commit must be public: CI runs `builder/build.sh verify ID`, which asks
 GitHub whether each `BUILD_*` commit is reachable from `BRANCH` on its
@@ -93,6 +99,73 @@ with triggers (`host.sh`) work the same way: every run boots its own VMs.
   `bash -x` trace of an Up, Enter run. ttyS2 is the host channel.
 - A demo **exports** its pool at the end and doesn't destroy it, so
   `--disk` can inspect the run disk later.
+
+## ZTS reproducers
+
+Most fix branches carry their own reproducer: the ZTS test of their "test,
+then fix" commits, or, for a test-only fix, the test itself. A reproducer
+with `KIND='zts'` runs it, so it needs only a `reproducer.conf`
+(`scripts/new-reproducer.sh` writes one from the branch):
+
+```sh
+KIND='zts'
+ZTS_TESTS='tests/functional/zstream/zstream_decompress_007_pos'
+TOOLS='file_write mkfile'      # ZTS helpers the tests use (builder/zts-tools.txt)
+EXPECT_repro='RESULT BUG'
+EXPECT_fixed='RESULT OK'
+MEM=2048 TIMEOUT=1800 DISKS=1 DISK_SIZE=16G
+```
+
+- **The scripts.** `builder/in/zts-pack.sh` takes, from each build's own
+  commit (a sparse, blobless fetch), `tests/zfs-tests/include` (with
+  `default.cfg` made from `default.cfg.in` as configure would),
+  `tests/test-runner/include`, the callbacks, and of each test's group the
+  test, the group's setup and cleanup (as the runfiles name them: `pre`,
+  `post`, `timeout`), its `.cfg`, `.kshlib` and `.shlib` files, and every
+  file or directory any of these names under `$STF_SUITE`, transitively.
+  They go to the demo disk as `/demo/zts/repro/` and `/demo/zts/fixed/`
+  (a few hundred KB each), so a test-only fix runs master's test on the
+  break and the fixed test on the fix, and a code fix runs its test commit's
+  test against both builds.
+- **The tools.** ZTS helpers (`file_write`, `mkfile`, ...) come with each
+  OpenZFS build (`TOOLS`, built and cached with it); ksh93, `getconf`,
+  `getent`, `lsblk`, `fallocate`, `blkid` come from the userland builder,
+  and `xxhash` (`xxh128sum`, which the data checks need) and libaio from its
+  distribution (`EXTRA_PKGS`). Everything goes on one constrained `PATH`,
+  the way `zfs-tests.sh` sets `STF_PATH`. GNU `losetup`, `setpriv`,
+  `unshare` and the shadow tools (`useradd`, ...) replace busybox's, and
+  `sudo` is a small `setpriv` wrapper (`builder/in/zts-sudo`: the forms
+  ZTS uses, `sudo -Eu USER` and `sudo -u '#UID'`). What only some tests
+  need comes when their scripts name it: `python3` and its standard
+  library, `jq`, `parted`, and `fio` (built from its release source by
+  `builder/in/fio.sh`: Ubuntu's package pulls in the ceph and gluster
+  libraries). ZED tests (`zed_setup` in the group) need `zed` in `TOOLS`:
+  the build then carries its `zed.rc` and zedlets, linked where
+  `default.cfg` looks (`scripts/new-reproducer.sh` adds it). A helper the
+  branch itself adds to `tests/zfs-tests/cmd` goes in `TOOLS` by name
+  (the scaffold finds those too).
+- **The runner** (`builder/in/zts-run.sh`, which is the image's `demo.sh`,
+  with the tests it runs appended for reading: `less /demo/demo.sh`, and the
+  script pane of `--console`) does what `zfs-tests.sh` and `test-runner` do
+  in openzfs/zfs CI: an ext2 file system on the run disk holds three 4 GiB
+  sparse files behind loop devices (`DISKS="loop0 loop1 loop2"`,
+  `FILEDIR`, `TMPDIR`), it sources `default.cfg`, and runs the group's setup,
+  each test and the cleanup with ksh93, each under the runfile's timeout.
+  The test's output appears on the console as it runs. It prints
+  `RESULT BUG` when a test FAILs or is killed by its timeout, `RESULT OK`
+  when every test PASSes, and `RESULT ERROR` when a setup fails or a test is
+  skipped or unresolved. The tests run from a writable copy of the
+  scripts (`/run/zts/suite`), as from a source tree.
+- **Oopses.** The runner sets `panic_on_oops`: a task that oopses can
+  wedge the guest (locks held, a CPU left with interrupts off), so the VM
+  panics instead, and the launcher reports `PANIC`. A bug that oopses (a
+  NULL dereference, `buffer modified while frozen`) has
+  `EXPECT_repro='PANIC'`. An SPL `VERIFY`/`PANIC at`, a kernel `BUG:`
+  warning or a hung task leaves the guest running: the runner prints
+  `RESULT BUG` with the kernel's line at once.
+- **Flakes.** `ZTS_ITERATIONS=N` runs the tests N times in one demo (one
+  boot); the break prints `RESULT BUG` if any run failed. For rarer flakes
+  add `RUNS_repro`/`MIN_MATCH_repro` (several boots), as for any reproducer.
 
 ## External triggers
 
@@ -188,6 +261,24 @@ with another hostid, and a disk copy. CI runs it on every change, so the
 trigger path keeps working before any published reproducer needs it.
 
 ## Adding a reproducer
+
+For a "test, then fix" branch, or a test-only fix, of ours on
+github.com/wrouesnel/zfs, the reproducer is mechanical:
+
+```sh
+scripts/new-reproducer.sh fix-some-branch          # reproducers/wrouesnel/fix-some-branch/
+scripts/new-reproducer.sh -t tests/functional/G/T fix-zts-branch   # when only a .kshlib changed
+builder/build.sh verify wrouesnel/fix-some-branch
+builder/build.sh all wrouesnel/fix-some-branch ubuntu24             # RESULT BUG / RESULT OK
+```
+
+It finds the break (the commit before the fix, or master for a test-only
+fix; for a branch stacked on another fix of ours, set `BUILD_repro` to this
+fix's own test commit and `ZTS_TESTS` to its test), the fix (the branch head), the tests the branch adds or changes, the
+ZTS helpers they use and the openzfs/zfs PR the branch heads. Check the
+result once on ubuntu24, set `ZTS_ITERATIONS` for a flake, and list the
+branch in [coverage.md](coverage.md). A bug that a ZTS test can't show (a
+console demo, host-side triggers) gets a `demo.sh` instead:
 
 1. Push the fix branch (the test commit, then the fix) to a public GitHub
    repository, for example github.com/wrouesnel/zfs.

@@ -24,7 +24,9 @@
 #   builder/build.sh tag ID LABEL TARGET      an image's tag
 #   builder/build.sh targets ID | ids | labels ID
 #   builder/build.sh verify ID                the builds' commits are public (GitHub)
-#   builder/build.sh plan                     the CI matrix (JSON)
+#   builder/build.sh plan                     the CI matrix (JSON; PREV_RESULTS=FILE
+#                                             leaves out jobs with unchanged inputs)
+#   builder/build.sh inputs ID TARGET         the hash of a job's inputs
 #   builder/build.sh key KIND ARGS...         cache keys (userland U, kernel T,
 #                                             builder T|u-U, zfs-user ..., zfs-kmod ...)
 #   builder/build.sh zdir user|kmod U|T REPO@SHA CONFIGURE...   a build's dir under work/
@@ -55,8 +57,13 @@ tagsafe() { printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'; }
 kver() { tagsafe "$(tconf "$1" KERNEL)"; }
 idtag() { printf '%s' "${1//\//-}"; }	# USER/SLUG -> USER-SLUG
 
-all_ids() {	# every reproducer, or only ONLY_IDS (space separated) when set
-	(cd "$T/reproducers" && for d in */*/reproducer.conf; do echo "${d%/reproducer.conf}"; done) |
+all_ids() {	# every reproducer, or only ONLY_IDS (space separated) when set;
+	# not those with BLOCKED='reason' in reproducer.conf (docs/coverage.md)
+	# unless WITH_BLOCKED=1
+	(cd "$T/reproducers" && for d in */*/reproducer.conf; do
+		[ -z "${WITH_BLOCKED:-}" ] && grep -q '^BLOCKED=' "$d" && continue
+		echo "${d%/reproducer.conf}"
+	done) |
 	    if [ -n "${ONLY_IDS:-}" ]; then grep -xF -f <(printf '%s\n' $ONLY_IDS); else cat; fi
 }
 all_targets() { (cd "$T/bases" && for d in */base.conf; do echo "${d%/base.conf}"; done); }
@@ -129,7 +136,10 @@ inb() {	# inb T|u-U CMD...: run CMD in that builder container
 	u-*) a=$(uconf "${b#u-}" ARCH) s=$(uconf "${b#u-}" SNAPSHOT) ;;
 	*) a=$(tarch "$b") k=$(tconf "$b" KERNEL) s=$(tconf "$b" SNAPSHOT) d=$(tconf "$b" DISTRO) ;;
 	esac
+	# BUILD_TMPFS=SIZE: the builder's /tmp (the OpenZFS source and objects)
+	# in memory instead of on the container storage's disk
 	$PODMAN run --rm --platform "$(plat "${a:-x86_64}")" --network=host -v "$T:/src:ro" -v "$WORK:/work" \
+	    ${BUILD_TMPFS:+--tmpfs "/tmp:rw,exec,size=$BUILD_TMPFS"} \
 	    -e KERNEL="$k" -e SOURCE_DATE_EPOCH=0 -e MAKEJOBS="${MAKEJOBS:-}" -e EXTRA="${EXTRA:-}" \
 	    -e ARCH="${a:-x86_64}" -e DISTRO="$d" -e SNAPSHOT="$s" \
 	    "$(builder_img "$b")" "$@"
@@ -173,7 +183,12 @@ cmd_zfs() {	# user|kmod U|T REPO@SHA CONFIGURE...
 	kmod) inb "$b" bash /src/builder/in/zfs.sh kmod "${rs%@*}" "${rs##*@}" "/work/${d#"$WORK"/}" "$@" ;;
 	esac
 }
-rextra() { rconf "$1" TOOLS; }
+rextra() {	# TOOLS, with @zts expanded (builder/zts-tools.txt)
+	local w
+	for w in $(rconf "$1" TOOLS); do
+		if [ "$w" = @zts ]; then grep -v '^#' "$T/builder/zts-tools.txt" | tr -s ' \n' ' '; else printf '%s ' "$w"; fi
+	done | sed 's/ $//'
+}
 cmd_zfs_for() {	# ID TARGET...: both halves of each build
 	local id=$1 l t u; shift
 	EXTRA=$(rextra "$id")
@@ -349,7 +364,7 @@ cmd_check() {	# ID TARGET [LABEL...]: --check every image; RESULTS_FILE gets one
 				$PODMAN run --rm $(kvm_args) -v "$runs:/runs" "$(img_of "$id" "$l" "$t")" --disk "$disk" --check ${VERBOSE:+--verbose} 2>&1 || lrc=1
 			fi
 		fi
-		[ -n "${RESULTS_FILE:-}" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$t" "$l" "$([ $lrc = 0 ] && echo pass || echo fail)" "$(tag_of "$id" "$l" "$t")" "$res" >>"$RESULTS_FILE"
+		[ -n "${RESULTS_FILE:-}" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$t" "$l" "$([ $lrc = 0 ] && echo pass || echo fail)" "$(tag_of "$id" "$l" "$t")" "$res" "$(cmd_inputs "$id" "$t")" >>"$RESULTS_FILE"
 		[ "$lrc" = 0 ] || rc=1
 	done
 	return $rc
@@ -379,7 +394,7 @@ cmd_plan() {	# JSON for the CI matrix, with every cache key and work dir
 						printf 'Z\t%s\t%s\t%s\t%s\t%s\t%s\n' "$u" "$rs" "$cfg" "$EXTRA" "$(cmd_key zfs-user "$u" "$rs" $cfg)" "$(zdir user "$u" "$rs" $cfg | sed "s|^$WORK/||")" >>"$WORK/.plan-z"
 					else printf '\t\t\t\t'; fi
 				done
-				printf '\n'
+				printf '\t%s\n' "$(cmd_inputs "$id" "$t")"
 				printf 'T\t%s\t%s\t%s\t%s\n' "$t" "$u" "$(cmd_key builder "$t")" "$(cmd_key kernel "$t")"
 				printf 'U\t%s\t%s\t%s\n' "$u" "$(cmd_key builder "u-$u")" "$(cmd_key userland "$u")"
 			done
@@ -396,11 +411,58 @@ for line in sys.stdin:
         for i, l in enumerate(("repro", "fixed")):
             k = f[7 + 4 * i: 11 + 4 * i]
             j[l] = {"user_key": k[0], "user_dir": k[1], "kmod_key": k[2], "kmod_dir": k[3]} if k and k[0] else None
+        j["inputs"] = f[15]
         jobs.append(j)
     elif f[0] == "T": targets[f[1]] = {"target": f[1], "userland": f[2], "builder_key": f[3], "kernel_key": f[4]}
     elif f[0] == "U": users[f[1]] = {"userland": f[1], "builder_key": f[2], "userland_key": f[3]}
     else: zfs[f[5]] = {"userland": f[1], "build": f[2], "configure": f[3], "extra": f[4], "key": f[5], "dir": f[6], "name": f[2].split("@")[1][:12]}
-print(json.dumps({"jobs": jobs, "targets": list(targets.values()), "userlands": list(users.values()), "zfs": list(zfs.values())}))'
+# incremental (PREV_RESULTS: the results.tsv of earlier runs, FULL unset):
+# leave out the jobs whose every image has a result for the same inputs
+import os
+prev, skipped, keep = os.environ.get("PREV_RESULTS"), [], None
+if prev and not os.environ.get("FULL") and os.path.exists(prev):
+    have = {}
+    for line in open(prev):
+        r = line.rstrip("\n").split("\t")
+        if len(r) >= 7:
+            have.setdefault((r[0], r[1], r[6]), set()).add(r[2])
+    keep = []
+    for j in jobs:
+        ls = {l for l in ("repro", "fixed") if j[l]}
+        (skipped if ls <= have.get((j["id"], j["target"], j["inputs"]), set()) else keep).append(j)
+    jobs = keep
+# at most MAX_JOBS reproducer x target jobs per run (the rest wait for the
+# next run): ubuntu24 first, the target every reviewer pulls
+deferred = []
+mx = int(os.environ.get("MAX_JOBS") or 0)
+if mx:
+    jobs.sort(key=lambda j: (j["target"] != "ubuntu24", j["target"], j["id"]))
+    jobs, deferred = (jobs[:mx], jobs[mx:]) if mx > 0 else ([], jobs)
+if skipped or deferred:
+    need = {j["target"] for j in jobs}
+    targets = {k: v for k, v in targets.items() if k in need}
+    keys = {j[l]["user_key"] for j in jobs for l in ("repro", "fixed") if j[l]}
+    zfs = {k: v for k, v in zfs.items() if k in keys}
+print(json.dumps({"jobs": jobs, "targets": list(targets.values()), "userlands": list(users.values()), "zfs": list(zfs.values()),
+                  "skipped": [j["name"] for j in skipped], "deferred": [j["name"] for j in deferred]}))'
+}
+# inputs ID TARGET: a hash of everything a reproducer x target job's images
+# and checks are made of (its reproducer directory, its builds and their
+# configuration, the kernel, userland and runtime keys, and the scripts that
+# pack the disks).  CI skips a job whose inputs are unchanged since its last
+# result (docs/ci.md); builder/build.sh itself (orchestration) is left out.
+cmd_inputs() {
+	local id=$1 t=$2 u l; u=$(userland_of "$t")
+	{
+		(cd "$T/reproducers/$id" && find . -type f | LC_ALL=C sort | while read -r f; do echo "$f"; cat "$f"; done)
+		echo "EXTRA=$(rextra "$id")"
+		for l in repro fixed; do echo "$l=$(rconf "$id" "BUILD_$l")"; done
+		cmd_key kernel "$t"; [ "$(tconf "$t" OS)" = Linux ] && cmd_key userland "$u"
+		hashof runtime/Containerfile runtime/prune.sh runtime/zfs-repro-vm
+		hashof builder/in/demo-disk.sh builder/in/zts-pack.sh builder/in/zts-run.sh builder/in/zts-udevadm builder/in/zts-sudo builder/in/zvol_name.c builder/in/build-disk.sh \
+		    builder/in/demo-common.sh builder/in/python-stdlib.sh builder/in/fio.sh builder/in/zfs.sh builder/in/guest/zr builder/zts-tools.txt \
+		    builder/Containerfile.demo builder/Containerfile.build builder/Containerfile.userland builder/Containerfile.kernel
+	} | sha256sum | cut -c1-16
 }
 cmd_key() {	# cache keys: what each output depends on
 	local u t rs
@@ -445,7 +507,7 @@ EXTRA=${EXTRA:-}
 case $c in
 builder) cmd_builder "$@" ;;
 builder-load) cmd_builder_load "$@" ;;
-userland | kernel | demo | disks | images | push | plan | key | sizes | verify) "cmd_$c" "$@" ;;
+userland | kernel | demo | disks | images | push | plan | key | sizes | verify | inputs) "cmd_$c" "$@" ;;
 zfs-user) cmd_zfs user "$@" ;;
 zfs-kmod) cmd_zfs kmod "$@" ;;
 zfs-for) cmd_zfs_for "$@" ;;

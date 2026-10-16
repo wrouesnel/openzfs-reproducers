@@ -272,7 +272,14 @@ The host trigger channel (`zr`) is Linux-only for now. What is covered:
 
 ## Adding a reproducer
 
-Push the fix branch to a public GitHub fork, then add `reproducers/USER/SLUG/`
+For a fix branch whose ZTS test shows the bug (a "test, then fix" branch,
+or a test-only fix), `scripts/new-reproducer.sh BRANCH` writes the whole
+reproducer: a `KIND=zts` `reproducer.conf` that runs the branch's test on
+the break and on the fix. Check it with `builder/build.sh all ID ubuntu24`
+and list it in [docs/coverage.md](docs/coverage.md), the inventory of our
+fix branches.
+
+Otherwise, push the fix branch to a public GitHub fork, then add `reproducers/USER/SLUG/`
 with `reproducer.conf` (the branch, the break and fix commits, the expected
 RESULT lines), `demo.sh` and optionally `inspect.sh`, helpers and `host.sh`.
 CI does the rest: it builds the pair for every target, records the results,
