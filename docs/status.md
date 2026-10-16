@@ -64,10 +64,17 @@ ours on the fork, with what it has and what blocks the rest:
   doesn't fail on ubuntu24 in the repeated runs.
 - The ZTS images are checked on ubuntu24 first (what console reviews
   pull); CI adds the other targets over its incremental runs (ci.md).
-- Upstream finding while porting: zstream raw's `write_zeros()` VERIFYs
-  that `pwritev()` wrote everything; in the guest (a file on ext4) it came
-  back short (2.9 of 4 MiB) on both builds of fix-zstream-raw-free-ordering,
-  so that reproducer is blocked until it is understood.
+- Upstream finding while porting (understood 2026-10-17, zfs-bug-hunt
+  #147/#148): fix-zstream-raw-free-ordering's zstream_raw_002_pos step 5
+  shrinks a volume that is then all holes, so the incremental stream frees
+  0 to 16 GiB.  zstream raw zero-fills that whole range in the image file
+  (#148), which filled the 16G run disk; the write that hit ENOSPC came
+  back short (2.9 of 4 MiB) and zstream aborted on a VERIFY instead of
+  reporting it (#147).  Both builds of the branch do this, as master does.
+  Not a disk sizing problem to paper over (a bigger disk would pass but
+  write 16 GiB per run): the reproducer stays blocked until the branch is
+  built with the #148 fix (fix-zstream-raw-free-past-end) or its test
+  avoids an all-hole volume.
 
 ## Ready once on the fork
 
