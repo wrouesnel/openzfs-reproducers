@@ -27,7 +27,7 @@ build commit is reachable from the branch it names on GitHub).
 | wrouesnel/fix-zts-crtime-001-flake | #19341 (flake) | master b060bcb1d | 956f6a607 | 120 |
 | wrouesnel/fix-zts-import-parallel-admin | #19341 (flake) | master b060bcb1d | 7a93f90d6 | 125 |
 | wrouesnel/fix-scrub-heal-stale-child-v2 | none yet | test 5bb2c5551 | head 2e661a806 | 127 |
-| wrouesnel/fix-mmp-first-txg-delay | none yet | test 378bf65ec | head 6a84e6765 | 138 |
+| wrouesnel/fix-mmp-first-txg-delay | none yet | test 32c2a4762 | head 2bc4f47cd (reflowed 2026-10-16) | 138 |
 | tigerblue77/zvol-rename-uevent | PR #19377 (@tigerblue77), issue #19371 | master c27dff0c3 | head 5c845323e | 129 (ours; the fix is theirs) |
 | wrouesnel/selftest-triggers | (self-test, ubuntu24 only) | master b060bcb1d | none | - |
 
@@ -37,32 +37,43 @@ ZTS library, and the ZTS helpers they need come with the build (`TOOLS`).
 The ZFS code of both builds is the same; the demo shows the test failing on
 the break and passing with the fix, several times per run.
 
-## Public fix branches without a demo yet
+## ZTS reproducers (2026-10-16)
 
-These are on github.com/wrouesnel/zfs and qualify, but there is no console
-demo to port (zfs-bug-hunt has none, or it needs more than the userland has):
+Most public fix branches have no console demo: their ZTS test is their
+reproducer. `KIND=zts` (reproducer-format.md, "ZTS reproducers") runs it
+from each build's own commit, and `scripts/new-reproducer.sh BRANCH`
+scaffolds the reproducer from the branch's commits. Every fix branch of
+ours on the fork, with what it has and what blocks the rest:
+[coverage.md](coverage.md).
 
-- fix-remove-resilvering-mirror (PR #19278): the demo (bug 1) answers a
-  review question (DTL_PARTIAL vs ours) and has no break/fix pair; a demo of
-  the bug itself is still to write.
-- zts-import-rewind-ckpt-txg (#136, flake 13/200), fix-zts-mmp-zhack-import-wait
-  (#138's test race): flake fixes; the tests need most of the ZTS library
-  (`import_rewind_metadata_damaged`, `mmp_active_import`), so a stand-in demo
-  is still to write. With `--runs` and `RUNS_repro`/`MIN_MATCH_repro=1` they
-  fit the flake format.
-- fix-zarcsummary-connreset (bug 124): its demo runs python3 (zarcsummary),
-  which the userland doesn't have.
-- fix-readonly-export-busy (bug 121): the demo is FreeBSD's; needs a FreeBSD
-  build of the fork head.
-- The other public fix-* and fix-zts-* branches (about 70) have no console
-  demo in zfs-bug-hunt; their ZTS tests are their reproducers.
+- Checked locally on ubuntu24 (`builder/build.sh all ID ubuntu24`: the
+  break prints its RESULT BUG or panics, the fix prints RESULT OK) with
+  the final runner: every reproducer coverage.md lists as "added now" with
+  an ubuntu24 result.
+- Bugs that oops expect `PANIC` (the runner sets `panic_on_oops`: an
+  oopsed task can wedge the guest so that no RESULT line gets out).
+- Flakes: zts-import-rewind-ckpt-txg (#136) shows with 8 vCPUs and 60
+  runs per boot; flakes that need CI's load, udev, FreeBSD or low memory
+  are kept with `BLOCKED='reason'`, which CI leaves out.
+- Ported console demos: fix-zarcsummary-connreset (zfs-bug-hunt 124,
+  Python from the userland builder), fix-zed-events-eintr (135).
+- Blocked (coverage.md has each reason): single-commit fixes without a test
+  (no demo yet), fix-initramfs-libcurl-symlink (needs initramfs-tools and a
+  kernel module tree in the guest), tests that need scsi_debug or valgrind,
+  FreeBSD-only fixes (no FreeBSD ZTS images yet), and flakes whose break
+  doesn't fail on ubuntu24 in the repeated runs.
+- The ZTS images are checked on ubuntu24 first (what console reviews
+  pull); CI adds the other targets over its incremental runs (ci.md).
+- Upstream finding while porting: zstream raw's `write_zeros()` VERIFYs
+  that `pwritev()` wrote everything; in the guest (a file on ext4) it came
+  back short (2.9 of 4 MiB) on both builds of fix-zstream-raw-free-ordering,
+  so that reproducer is blocked until it is understood.
 
 ## Ready once on the fork
 
 These branches are only in the local backup (~/git/will/zfs.git), so they
 can't be built here yet; each has a demo in zfs-bug-hunt:
 
-- fix-zed-events-eintr (bug 135, upstream #14720): demo repros/135/vm.
 - fix-zio-batch-priority-v2 (bug 122, upstream #19360): demo repros/122/vm.
 - fix-freebsd-fadvise-zos (bug 100, FreeBSD side of #19305): FreeBSD demo.
 - fix-import-dryrun-no-import (65), fix-send-dryrun-relay (66),

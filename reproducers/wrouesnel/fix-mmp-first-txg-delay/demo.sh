@@ -28,9 +28,9 @@
 #             last on-txg came out non-zero in every run);  fix: none.
 #
 # Builds (vm/mkdemo.sh 138 b-almalinux9 ..., debug, EXTRA=zgenhostid):
-#   bug  test commit 378bf65ec4 (master 22013c3917 + ZTS mmp_on_delay,
+#   bug  test commit 32c2a4762d (master 22013c3917 + ZTS mmp_on_delay,
 #        mmp_zero_delay_import)  -> "RESULT BUG: ..."
-#   fix  fix-mmp-first-txg-delay 6a84e67651  -> "RESULT OK: ..."
+#   fix  fix-mmp-first-txg-delay 2bc4f47cd1  -> "RESULT OK: ..."
 # Run as root:  /demo/demo.sh       about 15 s (bug), 50 s (fix).
 # Pool demo138 on the run disk $DEMO_DISK (vm/demo-vm.sh), or on the file
 # /var/tmp/demo138/vdev when DEMO_DISK is unset.  It is exported at the end
