@@ -7,13 +7,27 @@
 # output is cached by what it is made of (builder/build.sh key ...).
 # max-parallel keeps this workflow to a few runners at a time: GitHub's job
 # concurrency is per account, and the account's openzfs fork CI needs it too.
+# Incremental (docs/ci.md): a job runs only when its inputs (builder/build.sh
+# inputs) changed since its last result on the `results` branch, at most
+# MAX_JOBS per run, and none while the fork's zfs-qemu CI has runs queued.
 name: build
 
 on:
   push:
     branches: [main]
   pull_request:
+  # the jobs a capped run left for later (MAX_JOBS), when the fork's CI is idle
+  schedule:
+    - cron: '41 */6 * * *'
   workflow_dispatch:
+    inputs:
+      full:
+        description: 'Rebuild and recheck every job, even those whose inputs are unchanged'
+        type: boolean
+        default: false
+      max_jobs:
+        description: 'At most this many reproducer x target jobs (ubuntu24 first; the rest wait for the next run)'
+        default: '40'
 
 permissions:
   contents: read
@@ -30,6 +44,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       plan: ${{ steps.plan.outputs.plan }}
+      has_jobs: ${{ steps.plan.outputs.has_jobs }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: The builds' commits are public
@@ -45,14 +60,31 @@ jobs:
           done
           echo "ONLY_IDS=$ok" >>"$GITHUB_ENV"
       - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FULL: ${{ github.event.inputs.full == 'true' && '1' || '' }}
+          MAX_JOBS: ${{ github.event.inputs.max_jobs || '40' }}
         run: |
+          # the results so far (the results branch, written by the results job on main)
+          git fetch -q --depth=1 origin results && git show FETCH_HEAD:results.tsv >prev-results.tsv || : >prev-results.tsv
+          export PREV_RESULTS=$PWD/prev-results.tsv
+          # the fork's openzfs CI comes first: no reproducer jobs while it has queued runs
+          q=$(gh run list -R "${{ github.repository_owner }}/zfs" --workflow zfs-qemu.yml --status queued --json databaseId --jq length 2>/dev/null || echo unknown)
+          # (when the fork's queue can't be read, assume it is busy)
+          [ "$q" = unknown ] && q=99
+          if [ "${q:-0}" -gt 2 ] && [ "${{ github.event_name }}" != workflow_dispatch ]; then
+            echo "::notice::the fork's zfs-qemu CI has $q queued runs: no reproducer jobs this time"; MAX_JOBS=-1
+          fi
+          export MAX_JOBS
           plan=$(builder/build.sh plan)
-          echo "$plan" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["jobs"]), "reproducer x target jobs,", len(d["zfs"]), "OpenZFS userland builds"); [print(" ", j["id"], j["target"]) for j in d["jobs"]]'
+          echo "$plan" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["jobs"]), "reproducer x target jobs,", len(d["zfs"]), "OpenZFS userland builds,", len(d["skipped"]), "unchanged (skipped),", len(d["deferred"]), "left for the next run"); [print(" ", j["id"], j["target"]) for j in d["jobs"]]'
           echo "plan=$plan" >>"$GITHUB_OUTPUT"
+          echo "has_jobs=$(echo "$plan" | python3 -c 'import json,sys; print("yes" if json.load(sys.stdin)["jobs"] else "no")')" >>"$GITHUB_OUTPUT"
 
   # the shared userland and its builder (which also builds every OpenZFS userland)
   userland:
     needs: plan
+    if: needs.plan.outputs.has_jobs == 'yes'
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -75,6 +107,7 @@ jobs:
   # a target's builder (its distribution, compiler and kernel headers) and kernel
   target:
     needs: [plan, userland]
+    if: needs.plan.outputs.has_jobs == 'yes'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -106,6 +139,7 @@ jobs:
   # each OpenZFS userland (tools and libraries), once per commit
   zfs-user:
     needs: [plan, userland]
+    if: needs.plan.outputs.has_jobs == 'yes' && toJSON(fromJSON(needs.plan.outputs.plan).zfs) != '[]'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -136,7 +170,7 @@ jobs:
   # checks; on main, push the pair if the break reproduces and the fix passes
   repro:
     needs: [plan, target, zfs-user]
-    if: always() && needs.plan.result == 'success' && needs.userland.result != 'failure'
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.has_jobs == 'yes' && needs.userland.result != 'failure'
     runs-on: ubuntu-24.04
     name: ${{ matrix.id }} ${{ matrix.target }}
     permissions:
@@ -209,7 +243,7 @@ jobs:
           mkdir -p results
           if ! builder/build.sh zfs-for "$ID" "$TARGET"; then
             for l in $(builder/build.sh labels "$ID"); do
-              printf '%s\t%s\t%s\tbuild-failed\t%s\t%s\n' "$ID" "$TARGET" "$l" "$(builder/build.sh tag "$ID" "$l" "$TARGET")" "the OpenZFS build failed on this kernel" >>results/results.tsv
+              printf '%s\t%s\t%s\tbuild-failed\t%s\t%s\t%s\n' "$ID" "$TARGET" "$l" "$(builder/build.sh tag "$ID" "$l" "$TARGET")" "the OpenZFS build failed on this kernel" "$(builder/build.sh inputs "$ID" "$TARGET")" >>results/results.tsv
             done
             echo "OpenZFS build FAILED for this kernel" >>"$GITHUB_STEP_SUMMARY"
             echo "built=no" >>"$GITHUB_OUTPUT"; exit 0
@@ -240,7 +274,7 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
       - name: Push to ghcr.io
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check.outputs.publish == 'yes'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.check.outputs.publish == 'yes'
         run: |
           echo '${{ secrets.GITHUB_TOKEN }}' | podman login ghcr.io -u '${{ github.actor }}' --password-stdin
           builder/build.sh push "$ID" "$TARGET"
@@ -252,7 +286,7 @@ jobs:
     if: always() && needs.plan.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -261,9 +295,24 @@ jobs:
           pattern: results-*
           path: artifacts
       - run: |
-          find artifacts -name results.tsv -exec cat {} + | sort >results.tsv
+          # this run's results, plus the earlier results of the jobs it didn't
+          # run (unchanged or left for later) that are still in the matrix
+          find artifacts -name results.tsv -exec cat {} + | sort >new.tsv
+          git fetch -q --depth=1 origin results && git show FETCH_HEAD:results.tsv >prev.tsv || : >prev.tsv
+          for id in $(builder/build.sh ids); do for t in $(builder/build.sh targets "$id"); do printf '%s\t%s\n' "$id" "$t"; done; done >current.tsv
+          python3 -I scripts/merge-results.py new.tsv prev.tsv current.tsv >results.tsv
           scripts/results.sh results.tsv >results.md
           cat results.md >>"$GITHUB_STEP_SUMMARY"
+      - name: Record the results on the results branch
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          mkdir rb && cd rb && git init -q && git remote add origin "$(git -C .. remote get-url origin)"
+          git -c http.extraheader="$(git -C .. config --get http.https://github.com/.extraheader)" fetch -q --depth=1 origin results && git checkout -q FETCH_HEAD || git checkout -q --orphan results
+          cp ../results.tsv ../results.md .
+          git add results.tsv results.md
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "Results of run ${{ github.run_id }} (${{ github.sha }})" || exit 0
+          git -c http.extraheader="$(git -C .. config --get http.https://github.com/.extraheader)" push -q origin HEAD:refs/heads/results
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: results-matrix
@@ -271,7 +320,7 @@ jobs:
             results.tsv
             results.md
       - name: PR and issue alias tags
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
