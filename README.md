@@ -31,6 +31,8 @@ same images also have alias tags: `repro-pr19267-TARGET-KERNEL`,
 
 ## What is published
 
+[docs/index.md](docs/index.md) lists every reproducer with its fork branch, upstream PR and published images, and every branch of [wrouesnel/zfs](https://github.com/wrouesnel/zfs) (`scripts/index.sh` regenerates it).
+
 [docs/results.md](docs/results.md) is the matrix: every reproducer on every
 target, what the break and the fix printed, and whether the pair is
 published. A pair is published only when the break reproduces (`repro-` prints

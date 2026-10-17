@@ -15,9 +15,9 @@
 # takes the mount out of view).
 #
 # Builds (vm/mkdemo.sh 62 b-fedora44 ...):
-#   bug  test commit 17919a929 (master 465d86a78 + the ZTS test):
+#   bug  test commit 1c50374d7a (master 7c3d85aaf1 + the ZTS test):
 #        -> "RESULT BUG: df+stat every 5 s kept the snapshot mounted for 90 s ..."
-#   fix  fix-snapdir-expire-stat-v2 6fde83e8f:
+#   fix  fix-snapdir-expire-stat c0809677c5:
 #        -> "RESULT OK: the snapshot expired after N s of df+stat polling ..."
 # Run as root:  /demo/demo.sh       about 2 minutes.
 # Pool demo62 on the run disk $DEMO_DISK (vm/demo-vm.sh), or on the file
