@@ -1,9 +1,11 @@
 #!/bin/bash
 # demo.sh -- bug #173 / openzfs #11797: a mode 0 fallocate(2) that extends a
-# file decides to extend from i_size read before any range lock.  An
-# appending write that lands in between has already made the file bigger,
-# and the "extend" then cuts the file back to the fallocated length.  The
-# open file then reads back 128 KiB short, even after fsync.
+# file decides to extend from i_size read before any range lock.  When an
+# appending write lands in between, the "extend" cuts i_size and the page
+# cache back to the fallocated length, and it logs a TX_TRUNCATE outside the
+# range lock, which the ZIL can order after the write.  So the open file
+# reads back 128 KiB short, and after a crash ZIL replay truncates the file
+# on disk and the fsynced block is lost.
 #
 # Steps (zpool status -v at the start and end):
 #   1. pool demo173 on a file, dataset with recordsize=128k
@@ -11,18 +13,22 @@
 #   3. 2000 iterations of: new file; one thread appends 128 KiB at offset
 #      128 KiB, the other fallocates the first 128 KiB.  Both orders must
 #      leave a 256 KiB file holding the written bytes.
-#   4. the first bad file (kept as f.bad), reopened: size and contents of
-#      the second block, before and after export/import
-#   5. data check
+#   4. the first bad file (kept as f.bad), reopened, before and after
+#      export/import
+#   5. replay: pool demo173r on the run disk, frozen (zpool freeze: nothing
+#      more reaches the main pool, as in a crash), 3000 raced files each
+#      fsynced, then export/import, which replays the ZIL; every file checked
+#   6. data check
 #
 # Builds:
-#   bug  test commit af63ff9555 (master 7c3d85aaf1 + the ZTS test)
-#        -> "RESULT BUG: N of 2000 iterations left the file 128 KiB short"
-#   fix  fix-falloc-extend-no-trunc e6091abb73
-#        -> "RESULT OK: all 2000 iterations kept the appended 128 KiB"
-# Run as root:  /demo/demo.sh       about a minute.
+#   bug  test commit 4f76e87f5e (master 1e9b428dca + the ZTS test)
+#        -> "RESULT BUG: ..." (short open files, and files lost in replay)
+#   fix  fix-falloc-extend-no-trunc f7d6b6229b
+#        -> "RESULT OK: all 2000 iterations kept the appended 128 KiB, ..."
+# Run as root:  /demo/demo.sh       a few minutes.
 set -u
 P=demo173 D=/var/tmp/demo173 N=2000
+RP=demo173r RN=3000
 F=/$P/fs/f
 
 run() { echo "# $*"; "$@"; }
@@ -90,16 +96,54 @@ else
 fi
 st
 
-step "5. data check"
-if [ "$lost" != 0 ]; then
+step "5. replay: $RN raced, fsynced files on a frozen pool, then ZIL replay"
+zpool destroy -f $RP 2>/dev/null
+if [ -n "${DEMO_DISK:-}" ]; then
+	RV=$DEMO_DISK RD=$(dirname $DEMO_DISK)
+else
+	RD=/var/tmp/demo173r RV=$RD/vdev
+	rm -rf $RD; mkdir -p $RD; truncate -s 4G $RV
+fi
+run zpool create -f -O recordsize=128k -O compression=off $RP $RV || die "could not create $RP"
+run zfs create $RP/fs || die "could not create $RP/fs"
+run zpool sync $RP
+echo "# dd if=/dev/zero of=/$RP/fs/sync conv=fdatasync,fsync bs=1 count=1    (start the ZIL)"
+dd if=/dev/zero of=/$RP/fs/sync conv=fdatasync,fsync bs=1 count=1 status=none
+echo "-> freeze the pool: from here on only the ZIL reaches disk, as after a crash"
+run zpool freeze $RP || die "zpool freeze failed"
+echo "# /demo/falloc_race keep /$RP/fs $RN"
+/demo/falloc_race keep /$RP/fs $RN || die "falloc_race keep failed"
+echo "-> every file was fsynced: each must come back 256 KiB with block 2 all 0xa5"
+run zpool export $RP && run zpool import -d $RD $RP || die "export/import of $RP failed"
+echo "# /demo/falloc_race check /$RP/fs $RN"
+rout=$(/demo/falloc_race check /$RP/fs $RN); rrc=$?
+echo "$rout"
+[ $rrc -le 1 ] || die "falloc_race check failed"
+rlost=$(echo "$rout" | tail -1 | awk '{print $1}')
+first=$(echo "$rout" | awk '/^   \//{print $1; exit}' | tr -d :)
+if [ -n "$first" ]; then
+	echo "-> one of them, on disk after replay:"
+	show_file $first
+fi
+zpool destroy $RP
+[ -n "${DEMO_DISK:-}" ] || rm -rf $RD
+st
+
+step "6. data check"
+zpool destroy $P
+if [ "$lost" != 0 ] || [ "$rlost" != 0 ]; then
+	[ "$lost" = 0 ] || {
 	echo "-> $lost of $N iterations: once both calls had returned, the open file was"
-	echo "   131072 bytes instead of 262144, and still was after fsync: the fallocate"
-	echo "   'extend' cut the file back below the bytes the racing write had just added"
+	echo "   131072 bytes instead of 262144: the fallocate 'extend' cut i_size back"
+	echo "   below the bytes the racing write had just added"; }
+	[ "$rlost" = 0 ] || {
+	echo "-> $rlost of $RN fsynced files came back from ZIL replay 128 KiB short: the"
+	echo "   TX_TRUNCATE logged by the 'extend' replayed after the write, so the"
+	echo "   fsynced block is gone from disk"; }
 	echo "   (zpool status shows no errors: nothing flags it)"
-	zpool destroy $P
-	echo "RESULT BUG: $lost of $N iterations left the file 128 KiB short (131072 instead of 262144 bytes, also after fsync)"
+	echo "RESULT BUG: $lost of $N live iterations left the file 128 KiB short; $rlost of $RN fsynced files lost 128 KiB in ZIL replay"
 	exit 0
 fi
-echo "-> every iteration left a 256 KiB file with the written block intact"
-zpool destroy $P
-echo "RESULT OK: all $N iterations kept the appended 128 KiB"
+echo "-> every iteration left a 256 KiB file with the written block intact,"
+echo "   and every fsynced file came back whole from ZIL replay"
+echo "RESULT OK: all $N iterations kept the appended 128 KiB, and all $RN files survived ZIL replay"
