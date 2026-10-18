@@ -295,6 +295,17 @@ console demo, host-side triggers) gets a `demo.sh` instead:
    finds it and tags the images `repro-prN-...` / `fixed-prN-...` once the PR's
    head is the commit that was built. If the head moves, update `BUILD_fixed`.
 
+**Pool-state bugs get a console demo that shows the pool.** When the bug is
+about pool, vdev, scan, DTL or error state (resilver, scrub, replace, attach
+or detach, removal, expansion, import or rewind, I/O errors), a ZTS pass/fail
+line isn't enough for a reviewer. The demo echoes each command before it
+runs it and prints `zpool status -v` after every step, including the user-
+visible outcome of each admin action (accepted or refused, with the error
+text). The fixed run must visibly end repaired: the scan completed with 0
+errors, the devices in the expected state, `errors: No known data errors`,
+and the data verified. The break run must visibly show the damage.
+`wrouesnel/fix-resilver-unreadable-dtl` is an example.
+
 ## Targets and the userland
 
 `bases/TARGET/base.conf` is a target: a kernel. `FAMILY` picks the builder
