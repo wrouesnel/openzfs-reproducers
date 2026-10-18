@@ -45,6 +45,37 @@ zts_env() {
 	# a writable copy of the scripts: tests run in their directory, and
 	# some write there (snapshot_006_pos makes ./mkdir), as in a source tree
 	rm -rf /run/zts/suite; cp -a "$S" /run/zts/suite; S=/run/zts/suite
+	# the end state of each test, for the console reviewer: just before a
+	# test's cleanup runs, print the pools as the test left them (always on
+	# a failure; on a pass only in the last iteration of a flake run), so
+	# the break visibly ends bad and the fix visibly ends good
+	cat >/run/zts/state <<'EOS'
+#!/bin/bash
+rc=$1 cur=$(cat /run/zts/current 2>/dev/null)
+case ${cur##*/} in setup | cleanup) exit 0 ;; esac
+[ "$rc" = 0 ] && [ "${ZR_SHOW_PASS:-1}" != 1 ] && exit 0
+word=PASS; [ "$rc" != 0 ] && word=FAIL
+echo "--- end state of $cur ($word), as the test left it, before its cleanup ---"
+pools=$(timeout 20 zpool list -H -o name 2>/dev/null)
+if [ -z "$pools" ]; then
+	echo "(no pools imported)"
+else
+	for p in $pools; do
+		echo "# zpool status -v $p"
+		timeout 20 zpool status -v "$p" 2>&1 | sed 's/^/    /'
+	done
+	echo "# zfs list -o name,used,avail,refer,mountpoint"
+	timeout 20 zfs list -o name,used,avail,refer,mountpoint 2>&1 | head -30 | sed 's/^/    /'
+fi
+echo "--- end of the end state ---"
+EOS
+	chmod +x /run/zts/state
+	L=$S/runner/include/logapi.shlib
+	if grep -q '^	typeset stack=("${_CLEANUP\[@\]}")$' "$L"; then
+		sed -i '/^	typeset stack=("${_CLEANUP\[@\]}")$/i\	[[ -x /run/zts/state ]] \&\& /run/zts/state "$exitcode"' "$L"
+	else
+		echo "# (this ZTS's logapi.shlib has no hook point: no end-state dump)"
+	fi
 	export STF_SUITE=$S STF_TOOLS=$S/runner STF_PATH=$B PATH=$B UNAME=Linux
 	# shellcheck disable=SC1091
 	. "$S/include/default.cfg"
@@ -125,6 +156,7 @@ main() {
 	local grp cur post0 to0 skip
 	for ((i = 1; i <= ITER; i++)); do
 		[ "$ITER" -gt 1 ] && echo && echo "##### iteration $i of $ITER"
+		export ZR_SHOW_PASS=$([ "$i" -eq "$ITER" ] && echo 1 || echo 0)
 		cur= skip=
 		while read -r -u3 d t pre post to; do
 			[ -n "$d" ] || continue

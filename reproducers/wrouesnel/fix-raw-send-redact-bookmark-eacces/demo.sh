@@ -54,10 +54,18 @@ if [ $src_rc = 0 ]; then
 	echo "  sent $(wc -c <$d/incr) bytes"
 	echo "# zfs receive $recv < incr"
 	zfs receive $recv <$d/incr 2>&1 && rc=ok || rc=recvfail
-	zfs list -t snapshot -o name -r $recv
 else
 	rc=sendfail
 fi
+echo
+echo "--- end state ---"
+echo "# zfs get -H -o name,value keystatus $src   (the key was never loaded)"
+zfs get -H -o name,value keystatus $src | sed 's/^/    /'
+echo "# zfs list -t snapshot -o name -r $recv   (s1 arrives only if the raw incremental worked)"
+zfs list -H -t snapshot -o name -r $recv | sed 's/^/    /'
+echo "# zpool status -x $pool"
+zpool status -x $pool | sed 's/^/    /'
+echo "--- end of the end state ---"
 zpool export $pool && echo "# pool $pool exported (on $V)"
 echo
 case $rc in
