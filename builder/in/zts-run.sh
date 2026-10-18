@@ -60,6 +60,8 @@ pools=$(timeout 20 zpool list -H -o name 2>/dev/null)
 if [ -z "$pools" ]; then
 	echo "(no pools imported)"
 else
+	echo "# zpool list -o name,size,alloc,free,health,readonly"
+	timeout 20 zpool list -o name,size,alloc,free,health,readonly 2>&1 | sed 's/^/    /'
 	for p in $pools; do
 		echo "# zpool status -v $p"
 		timeout 20 zpool status -v "$p" 2>&1 | sed 's/^/    /'
