@@ -167,6 +167,8 @@ MEM=2048 TIMEOUT=1800 DISKS=1 DISK_SIZE=16G
   boot); the break prints `RESULT BUG` if any run failed. For rarer flakes
   add `RUNS_repro`/`MIN_MATCH_repro` (several boots), as for any reproducer.
 
+- **What the reviewer sees.** Each test's output is shown as it runs. Just before a test's cleanup, the runner prints its *end state*: `zpool list` (health, readonly), then `zpool status -v` of every pool, then `zfs list`. It does that always on a failure, and on a pass only in the last iteration of a flake run. The failure's reason (the `log_fail` message, or the last `ERROR:` line of a failed `log_must`) is in that header, and all the reasons are listed again before the RESULT. Where the end state needs explaining (e.g. an error the test causes on purpose), set `ZTS_NOTE` (both builds) or `ZTS_NOTE_repro` / `ZTS_NOTE_fixed`; it is printed before the RESULT.
+
 ## External triggers
 
 The container is the VMs' host, so a reproducer can act from outside the VM:

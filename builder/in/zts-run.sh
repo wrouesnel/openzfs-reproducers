@@ -52,6 +52,7 @@ zts_env() {
 	cat >/run/zts/state <<'EOS'
 #!/bin/bash
 rc=$1 why=${2:-} cur=$(cat /run/zts/current 2>/dev/null)
+[ -z "$why" ] && why=$(cat /run/zts/lasterror 2>/dev/null)
 case ${cur##*/} in setup | cleanup) exit 0 ;; esac
 [ "$rc" = 0 ] && [ "${ZR_SHOW_PASS:-1}" != 1 ] && exit 0
 word=PASS
@@ -82,6 +83,9 @@ EOS
 	else
 		echo "# (this ZTS's logapi.shlib has no hook point: no end-state dump)"
 	fi
+	# log_must reports a failure as "ERROR: CMD exited N" and calls
+	# log_fail without a message: keep the last ERROR as the reason
+	sed -i '/^	_printline ERROR: "\$@"$/i\	print -r -- "$*" >/run/zts/lasterror 2>/dev/null' "$L"
 	export STF_SUITE=$S STF_TOOLS=$S/runner STF_PATH=$B PATH=$B UNAME=Linux
 	# shellcheck disable=SC1091
 	. "$S/include/default.cfg"
@@ -141,6 +145,7 @@ stf() {	# test-runner's names for a script's exit status
 }
 run_one() {	# DIR SCRIPT TIMEOUT: prints the result word, returns the status
 	local d=$1 s=$2 to=$3 rc
+	rm -f /run/zts/lasterror
 	[ -x "$STF_SUITE/$d/$s.ksh" ] || { echo "(no $d/$s.ksh)"; return 0; }
 	echo "$d/$s" >/run/zts/current
 	echo; echo "=== $d/$s ($build build, timeout ${to}s)"
@@ -195,6 +200,8 @@ main() {
 		echo "# why each failing run failed:"
 		sed 's/^/    /' /run/zts/reasons
 	fi
+	local note; note=$(cfg ZTS_NOTE_$build); [ -n "$note" ] || note=$(cfg ZTS_NOTE)
+	[ -n "$note" ] && { echo "# note:"; echo "$note" | fold -s -w 76 | sed 's/^/    /'; }
 	if [ -n "$fails" ]; then
 		echo "RESULT BUG: ZTS failed:$fails ($build build; $(echo $fails | wc -w) of $n runs)"
 	elif [ -n "$errs" ]; then
