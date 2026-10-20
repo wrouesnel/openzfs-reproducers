@@ -12,7 +12,9 @@ the same script the workflow ran:
     builder/build.sh all USER/SLUG [TARGET...]          # build, then --check each pair
     builder/build.sh push USER/SLUG TARGET [LABEL...]   # only after both checks pass
 
-A pair is pushed only when the break prints its expected `RESULT BUG` and the
+`scripts/build-local.sh [TARGET...]` runs every committed reproducer that way,
+one job at a time (ubuntu24 first), skipping images already on GHCR, and logs
+to `work/local/`. A pair is pushed only when the break prints its expected `RESULT BUG` and the
 fix prints `RESULT OK` on that kernel, as before.
 
 Two workflows remain, and neither builds anything:
