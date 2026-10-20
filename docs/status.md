@@ -63,7 +63,7 @@ ours on the fork, with what it has and what blocks the rest:
   FreeBSD-only fixes (no FreeBSD ZTS images yet), and flakes whose break
   doesn't fail on ubuntu24 in the repeated runs.
 - The ZTS images are checked on ubuntu24 first (what console reviews
-  pull); CI adds the other targets over its incremental runs (ci.md).
+  pull); other targets are built locally when needed (ci.md).
 - Upstream finding while porting (understood 2026-10-17, zfs-bug-hunt
   #147/#148): fix-zstream-raw-free-ordering's zstream_raw_002_pos step 5
   shrinks a volume that is then all holes, so the incremental stream frees

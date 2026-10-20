@@ -1,7 +1,6 @@
 #!/bin/bash
 # builder/build.sh: build the userland, the targets (kernels), the OpenZFS
-# builds, the demo and build disks and the container images, locally or in
-# CI (.github/workflows/build.yml runs the same steps).  Needs podman;
+# builds, the demo and build disks and the container images.  Needs podman;
 # everything that compiles runs in a builder container (builder/Containerfile.*).
 #
 # A reproducer ID is USER/SLUG (reproducers/USER/SLUG/reproducer.conf): the
@@ -20,7 +19,7 @@
 #   builder/build.sh disks ID TARGET...       the build disks
 #   builder/build.sh images ID TARGET...      runtime, userland, kernel, demo, build layers
 #   builder/build.sh check ID TARGET [LABEL...]   podman run IMAGE --check (+ --disk)
-#   builder/build.sh push ID TARGET [LABEL...]    push the images (main branch CI)
+#   builder/build.sh push ID TARGET [LABEL...]    push the images (after check)
 #   builder/build.sh tag ID LABEL TARGET      an image's tag
 #   builder/build.sh targets ID | ids | labels ID
 #   builder/build.sh verify ID                the builds' commits are public (GitHub)

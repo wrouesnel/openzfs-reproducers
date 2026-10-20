@@ -1,6 +1,6 @@
 # Daily: point the PR and issue alias tags (repro-prN-..., fixed-issueN-...)
 # at the published images whose branch a PR now heads or an issue names
-# (scripts/aliases.py).  build.yml does the same after each push to main.
+# (scripts/aliases.py).  Run it by hand (workflow_dispatch) after pushing new images.
 name: aliases
 
 on:

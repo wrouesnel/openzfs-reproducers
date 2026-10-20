@@ -207,13 +207,14 @@ runs (`--runs`) work for these too.
 
 ## Verification
 
-- Every published image comes from `.github/workflows/build.yml` in this
-  repository. It builds the userland, each target's kernel, every OpenZFS build
-  (from the commits pinned in `reproducers/USER/SLUG/reproducer.conf`, checked
-  to be public) and the images on GitHub's runners. It then runs both images
-  of each pair in a VM with `--check`, and pushes only if both print their
-  expected RESULT. The image's `org.opencontainers.image.revision` label is
-  this repository's commit.
+- Every published image is built and checked with `builder/build.sh` (see
+  "Building"), on the maintainer's machine since 2026-10-20 (it was GitHub CI
+  before; [docs/ci.md](docs/ci.md) says why). It builds the userland, each
+  target's kernel, every OpenZFS build (from the commits pinned in
+  `reproducers/USER/SLUG/reproducer.conf`, checked to be public) and the
+  images. It then runs both images of each pair in a VM with `--check`, and
+  pushes only if both print their expected RESULT. The image's
+  `org.opencontainers.image.revision` label is this repository's commit.
 - The labels and annotations name the OpenZFS commit of the build
   (`io.github.wrouesnel.zfs-repro.build`), the fix branch, the target and
   kernel, and the expected result: `podman inspect` or `skopeo inspect`.
