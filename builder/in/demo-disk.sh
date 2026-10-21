@@ -21,6 +21,9 @@ rm -rf "$O"/*
 q() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 conf() { (set +u; . "$1"; eval "printf '%s' \"\${$2:-}\""); }
 RC=$RD/reproducer.conf
+# an extended userland (BASE=ext) lists its real programs and its packages:
+# what it has isn't put on the demo disk again
+inext() { [ -f "$UD/bins" ] && grep -qxF "$1" "$UD/bins"; }
 {
 	echo "# reproducer $ID (reproducers/$ID/reproducer.conf)"
 	grep -v -e '^#' -e '^$' "$RC"
@@ -59,23 +62,36 @@ if [ "$KIND" = zts ]; then
 	    ln chmod chown md5sum sha256sum numfmt nproc base64 sum cksum split expr comm paste shuf \
 	    useradd userdel usermod groupadd groupdel losetup setpriv unshare \
 	    "$BINS")
-	# no udev in the VM: the /dev/zvol links come from zts-udevadm
+	# no udev in the VM: the /dev/zvol links come from zts-udevadm (the
+	# extended userland has udev)
 	mkdir -p "$R/bin"
-	cc -O2 -s -w -o "$R/bin/zvol_name" "$(dirname "$0")/zvol_name.c"
-	install -m 755 "$(dirname "$0")/zts-udevadm" "$R/bin/udevadm"
+	if ! inext udevadm; then
+		cc -O2 -s -w -o "$R/bin/zvol_name" "$(dirname "$0")/zvol_name.c"
+		install -m 755 "$(dirname "$0")/zts-udevadm" "$R/bin/udevadm"
+	fi
 	install -m 755 "$(dirname "$0")/zts-sudo" "$R/bin/sudo"	# setpriv, for user_run
 	PKGS="xxhash libaio1t64 procps libproc2-0 $PKGS"
 	# tests that call python3 get it, and its standard library
-	ZTS_PY=; grep -rqw python3 "$R"/zts/*/tests && ZTS_PY=1 BINS=$(printf '%s\n' "$BINS" python3)
+	ZTS_PY=; grep -rqw python3 "$R"/zts/*/tests && ! inext python3 && ZTS_PY=1 BINS=$(printf '%s\n' "$BINS" python3)
 	# and jq (zpool status -j / zfs list -j tests)
 	grep -rqw jq "$R"/zts/*/tests && PKGS="$PKGS jq libjq1 libonig5"
 	# and fio (built from source: builder/in/fio.sh)
-	grep -rqw fio "$R"/zts/*/tests && bash "$(dirname "$0")/fio.sh" "$R/bin"
+	grep -rqw fio "$R"/zts/*/tests && ! inext fio && bash "$(dirname "$0")/fio.sh" "$R/bin"
 	# and parted (libtest's partition helpers: cleanup_devices, set_partition, ...)
 	grep -rqwE 'parted|cleanup_devices|zero_partitions|set_partition|partition_disk|delete_partitions' "$R"/zts/*/tests &&
 	    PKGS="$PKGS parted libparted2t64 libdevmapper1.02.1 libreadline8t64"
 fi
 chmod 755 "$R"/*.sh 2>/dev/null || true
+if [ -f "$UD/bins" ]; then
+	# the extended userland's own programs and packages (ksh stays: the
+	# ZTS runner links /demo/bin/ksh)
+	BINS=$(printf '%s\n' "$BINS" | while read -r b; do
+		case $b in '' | '#'*) continue ;; esac
+		[ "${b%%=*}" != ksh ] && inext "${b%%=*}" && continue
+		echo "$b"
+	done)
+	PKGS=$(for p in $PKGS; do grep -qxF "$p" "$UD/pkgs" || echo "$p"; done | tr '\n' ' ')
+fi
 # EXTRA_PKGS: packages of the builder's distribution (its snapshot) that the
 # demo needs and the builder doesn't have: unpacked, their programs on
 # /demo/bin and their libraries on /demo/lib

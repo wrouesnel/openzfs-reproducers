@@ -13,6 +13,10 @@
 #   builder/build.sh all ID [TARGET...]       everything for ID, then check
 #   builder/build.sh userland USERLAND        the shared root (work/userlands/U)
 #   builder/build.sh kernel TARGET            a target's kernel (work/targets/T)
+#   builder/build.sh userland-ext U-ext       an extended userland (work/userlands/U-ext)
+#   builder/build.sh kernel-ext TARGET        a target's extended kernel layer:
+#                                             its full module tree (work/targets/T-ext)
+#   builder/build.sh base ID TARGET           the base of ID's images ('' or ext-HASH)
 #   builder/build.sh resolve ID [LABEL]       resolve the build specs now (below)
 #   builder/build.sh zfs-user USERLAND REPO@SHA [CONFIGURE...]   OpenZFS tools
 #   builder/build.sh zfs-kmod TARGET REPO@SHA [CONFIGURE...]     OpenZFS modules
@@ -78,6 +82,19 @@ targets_of() {	# the targets a reproducer is built for
 }
 labels() { local l; for l in repro fixed; do [ -n "$(rconf "$1" "BUILD_$l")" ] && echo "$l"; done; }
 userland_of() { tconf "$1" USERLAND; }
+# BASE='ext' in reproducer.conf: the extended userland (userlands/U-ext,
+# PARENT=U) and the targets' extended kernel layers (full module trees)
+# instead of the standard ones (docs/reproducer-format.md).  The OpenZFS
+# builds are the same either way (built with the parent userland).
+rbase() {
+	local b; b=$(rconf "$1" BASE)
+	case $b in '' | ext) echo "$b" ;; *) echo "$1: BASE='$b': only 'ext' (or nothing) is known" >&2; exit 1 ;; esac
+}
+xuserland_of() { echo "$(userland_of "$1")-ext"; }	# TARGET: its extended userland
+root_userland() {	# ID TARGET: the userland ID's images boot on TARGET
+	if [ "$(rbase "$1")" = ext ]; then xuserland_of "$2"; else userland_of "$2"; fi
+}
+ubuilder() { local p; p=$(uconf "$1" PARENT); echo "u-${p:-$1}"; }	# an ext userland uses its parent's builder
 
 # ---- build specs ----------------------------------------------------------------
 # BUILD_repro and BUILD_fixed are specs (docs/reproducer-format.md, "Build
@@ -198,6 +215,12 @@ img_of() { echo "$IMAGE:$(tag_of "$@")"; }
 tag_runtime() { echo "$IMAGE:runtime-$(hashof runtime/Containerfile runtime/prune.sh runtime/zfs-repro-vm | cut -c1-12)"; }
 tag_userland() { echo "$IMAGE:userland-$1-$(cat "$WORK/userlands/$1/hash")"; }
 tag_kernel() { echo "$IMAGE:kernel-$1-$(kver "$1")"; }
+tag_kernel_ext() { echo "$IMAGE:kernel-$1-$(kver "$1")-ext-$(cat "$WORK/targets/$1-ext/hash")"; }
+base_of() {	# ID TARGET: '' (standard) or ext-HASH (the extended kernel layer's
+	# key), the image label io.github.wrouesnel.zfs-repro.base
+	[ "$(rbase "$1")" = ext ] || return 0
+	echo "ext-$(cmd_key kernel-ext "$2" | sed 's/.*-//' | cut -c1-12)"
+}
 tag_demo() { echo "localhost/zfs-repro-demo:$(idtag "$1")-$2"; }
 
 # ---- builders -----------------------------------------------------------------
@@ -268,6 +291,41 @@ cmd_kernel() {
 	} >>"$o.tmp/base.conf"
 	rm -rf "$o"; mv "$o.tmp" "$o"
 }
+# the extended userland and kernel layers (BASE=ext); cached by their keys,
+# built under a lock (another build may want the same layer)
+cmd_userland_ext() {
+	local x=$1 p o=$WORK/userlands/$1 h
+	p=$(uconf "$x" PARENT); [ -n "$p" ] || { echo "userland $x has no PARENT" >&2; exit 1; }
+	h=$(cmd_key userland "$x" | sed 's/^userland-//' | cut -c1-12)
+	[ -f "$o/userland.qcow2" ] && [ "$(cat "$o/hash" 2>/dev/null)" = "$h" ] && { echo "userland $x: cached"; return; }
+	[ -f "$WORK/userlands/$p/base.qcow2" ] || cmd_userland "$p"
+	mkdir -p "$WORK/userlands"
+	(
+		flock 9
+		[ -f "$o/userland.qcow2" ] && [ "$(cat "$o/hash" 2>/dev/null)" = "$h" ] && { echo "userland $x: cached"; exit 0; }
+		rm -rf "$o.tmp"
+		inb "$(ubuilder "$x")" bash /src/builder/in/userland-ext.sh "$x" "/work/userlands/$x.tmp" "/work/userlands/$p" || exit 1
+		echo "$h" >"$o.tmp/hash"
+		rm -rf "$o"; mv "$o.tmp" "$o"
+	) 9>"$o.lock"
+}
+cmd_kernel_ext() {
+	local t=$1 x o=$WORK/targets/$1-ext h; x=$(xuserland_of "$t")
+	h=$(cmd_key kernel-ext "$t" | sed 's/.*-//' | cut -c1-12)
+	[ -f "$o/base.qcow2" ] && [ "$(cat "$o/hash" 2>/dev/null)" = "$h" ] && { echo "target $t (ext): cached"; return; }
+	cmd_userland_ext "$x"
+	[ -f "$WORK/targets/$t/base.conf" ] || cmd_kernel "$t"
+	mkdir -p "$WORK/targets"
+	(
+		flock 9
+		[ -f "$o/base.qcow2" ] && [ "$(cat "$o/hash" 2>/dev/null)" = "$h" ] && { echo "target $t (ext): cached"; exit 0; }
+		rm -rf "$o.tmp"
+		inb "$t" bash /src/builder/in/kernel-ext-modules.sh "$t" "/work/targets/$t-ext.tmp" || exit 1
+		inb "$(ubuilder "$x")" bash /src/builder/in/kernel-ext.sh "$t" "/work/targets/$t-ext.tmp" "/work/userlands/$x" "/work/targets/$t" || exit 1
+		echo "$h" >"$o.tmp/hash"
+		rm -rf "$o"; mv "$o.tmp" "$o"
+	) 9>"$o.lock"
+}
 zdir() {	# zdir user|kmod U|T REPO@SHA CONFIGURE...: the work dir of one OpenZFS half
 	local m=$1 b=$2 rs=$3; shift 3
 	case $m in
@@ -305,10 +363,11 @@ cmd_zfs_for() {	# ID TARGET...: both halves of each build
 	done
 }
 cmd_demo() {
-	local id=$1 u f; u=${2:-$(userland_of "$(targets_of "$id" | head -1)")}; f=$(resfile "$id")
-	[ -f "$WORK/userlands/$u/files" ] || cmd_userland "$u"
+	local id=$1 u f; u=${2:-$(root_userland "$id" "$(targets_of "$id" | head -1)")}; f=$(resfile "$id")
+	if [ -n "$(uconf "$u" PARENT)" ]; then cmd_userland_ext "$u"
+	else [ -f "$WORK/userlands/$u/files" ] || cmd_userland "$u"; fi
 	resolve_id "$id" || exit 1
-	inb "u-$u" bash /src/builder/in/demo-disk.sh "$id" "/src/reproducers/$id" "/work/userlands/$u" "/work/demos/$id" "/work/${f#"$WORK"/}"
+	inb "$(ubuilder "$u")" bash /src/builder/in/demo-disk.sh "$id" "/src/reproducers/$id" "/work/userlands/$u" "/work/demos/$id" "/work/${f#"$WORK"/}"
 }
 cmd_disks() {	# ID TARGET...: each label's build disk for each target
 	local id=$1 t l u du dk o d; shift
@@ -366,14 +425,38 @@ cmd_images() {	# ID TARGET...
 	$PODMAN image exists "$(tag_runtime)" ||
 	    $PODMAN build -q -t "$(tag_runtime)" -f "$T/runtime/Containerfile" "$T/runtime" >/dev/null
 	echo "image $(tag_runtime)"
+	local ext kfrom; ext=$(rbase "$id")
 	for t in "$@"; do
-		u=$(userland_of "$t") from=
+		u=$(userland_of "$t") from= kfrom=
 		if [ "$(tconf "$t" OS)" = FreeBSD ]; then
 			# a FreeBSD target is one disk (kernel and userland) built on
 			# FreeBSD (scripts/freebsd-image.sh): no userland layer
 			from=$(tag_runtime)
 		fi
-		if [ -z "$from" ]; then
+		if [ -z "$from" ] && [ "$ext" = ext ]; then
+		# BASE=ext: the extended userland, then the target's extended
+		# kernel layer (an overlay of the userland's disk: kernel-ext.sh)
+		u=$(xuserland_of "$t")
+		cmd_kernel_ext "$t" >/dev/null	# (cached: built by `all`)
+		rm -rf "$ctx/u"; mkdir -p "$ctx/u/base"
+		cp -p "$WORK/userlands/$u/userland.qcow2" "$ctx/u/base/userland-$u.qcow2"; cp -p "$WORK/userlands/$u/SOURCES.txt" "$ctx/u/"
+		chmod 644 "$ctx/u/base/userland-$u.qcow2"
+		$PODMAN build -q --timestamp 0 -t "$(tag_userland "$u")" --build-arg FROM="$(tag_runtime)" \
+		    --label org.opencontainers.image.source="$SRCURL" \
+		    --label org.opencontainers.image.description="zfs-repro extended userland $u (no kernel, no reproducer)" \
+		    -f "$T/builder/Containerfile.userland" "$ctx/u" >/dev/null
+		echo "image $(tag_userland "$u")"
+		rm -rf "$ctx/k"; mkdir -p "$ctx/k/base"
+		for f in vmlinuz initrd base.conf base.qcow2; do [ -f "$WORK/targets/$t-ext/$f" ] && cp -p "$WORK/targets/$t-ext/$f" "$ctx/k/base/" && chmod 644 "$ctx/k/base/$f"; done
+		cp -p "$WORK/targets/$t-ext/SOURCES.txt" "$ctx/k/"
+		$PODMAN build -q --timestamp 0 -t "$(tag_kernel_ext "$t")" --build-arg FROM="$(tag_userland "$u")" \
+		    --label org.opencontainers.image.source="$SRCURL" \
+		    --label org.opencontainers.image.description="zfs-repro target $t, extended: $(tconf "$t" DISTRO) kernel $(tconf "$t" KERNEL) and its full module tree (no reproducer)" \
+		    --label io.github.wrouesnel.zfs-repro.target="$t" --label io.github.wrouesnel.zfs-repro.kernel="$(tconf "$t" KERNEL)" \
+		    -f "$T/builder/Containerfile.kernel" "$ctx/k" >/dev/null
+		echo "image $(tag_kernel_ext "$t")"
+		kfrom=$(tag_kernel_ext "$t")
+		elif [ -z "$from" ]; then
 		# userland: the root disk every target shares
 		rm -rf "$ctx/u"; mkdir -p "$ctx/u/base"
 		cp -p "$WORK/userlands/$u/base.qcow2" "$ctx/u/base/"; cp -p "$WORK/userlands/$u/SOURCES.txt" "$ctx/u/"
@@ -385,6 +468,7 @@ cmd_images() {	# ID TARGET...
 		echo "image $(tag_userland "$u")"
 		from=$(tag_userland "$u")
 		fi
+		if [ -z "$kfrom" ]; then
 		# kernel: the target
 		rm -rf "$ctx/k"; mkdir -p "$ctx/k/base"
 		for f in vmlinuz initrd base.conf base.qcow2; do [ -f "$WORK/targets/$t/$f" ] && cp -p "$WORK/targets/$t/$f" "$ctx/k/base/" && chmod 644 "$ctx/k/base/$f"; done
@@ -395,13 +479,15 @@ cmd_images() {	# ID TARGET...
 		    --label io.github.wrouesnel.zfs-repro.target="$t" --label io.github.wrouesnel.zfs-repro.kernel="$(tconf "$t" KERNEL)" \
 		    -f "$T/builder/Containerfile.kernel" "$ctx/k" >/dev/null
 		echo "image $(tag_kernel "$t")"
+		kfrom=$(tag_kernel "$t")
+		fi
 		# demo: the same layer content for every target and build
 		rm -rf "$ctx/d"; mkdir -p "$ctx/d/repro" "$ctx/d/sources"
 		D=$WORK/demos/$id
 		cp -p "$D/repro.conf" "$D/demo.sh" "$ctx/d/repro/"
 		for f in demo.qcow2 inspect.sh host.sh; do [ -f "$D/$f" ] && cp -p "$D/$f" "$ctx/d/repro/"; done
 		cp -p "$D/SOURCES.txt" "$ctx/d/sources/"
-		$PODMAN build -q --timestamp 0 -t "$(tag_demo "$id" "$t")" --build-arg FROM="$(tag_kernel "$t")" \
+		$PODMAN build -q --timestamp 0 -t "$(tag_demo "$id" "$t")" --build-arg FROM="$kfrom" \
 		    -f "$T/builder/Containerfile.demo" "$ctx/d" >/dev/null
 		for l in $(labels "$id"); do
 			o=$WORK/builds/$id/$t/$l
@@ -427,6 +513,7 @@ cmd_images() {	# ID TARGET...
 			[ -n "$(rconf "$id" AUTHOR)" ] && lbl "io.github.wrouesnel.zfs-repro.author=$(rconf "$id" AUTHOR)"
 			[ -n "$(rconf "$id" PRS)" ] && lbl "io.github.wrouesnel.zfs-repro.prs=$(rconf "$id" PRS)"
 			[ -n "$(rconf "$id" ISSUES)" ] && lbl "io.github.wrouesnel.zfs-repro.issues=$(rconf "$id" ISSUES)"
+			[ "$ext" = ext ] && lbl "io.github.wrouesnel.zfs-repro.base=$(base_of "$id" "$t")"
 			aargs=(); for a in "${largs[@]}"; do [ "$a" = --label ] && aargs+=(--annotation) || aargs+=("$a"); done
 			$PODMAN build -q --timestamp 0 -t "$(img_of "$id" "$l" "$t")" --build-arg FROM="$(tag_demo "$id" "$t")" \
 			    -f "$T/builder/Containerfile.build" "${largs[@]}" "${aargs[@]}" "$ctx/b" >/dev/null
@@ -502,7 +589,7 @@ cmd_plan() {	# JSON for the CI matrix, with every cache key and work dir
 						printf 'Z\t%s\t%s\t%s\t%s\t%s\t%s\n' "$u" "$rs" "$cfg" "$EXTRA" "$(cmd_key zfs-user "$u" "$rs" $cfg)" "$(zdir user "$u" "$rs" $cfg | sed "s|^$WORK/||")" >>"$WORK/.plan-z"
 					else printf '\t\t\t\t'; fi
 				done
-				printf '\t%s\n' "$(cmd_inputs "$id" "$t")"
+				printf '\t%s\t%s\n' "$(cmd_inputs "$id" "$t")" "$(base_of "$id" "$t")"
 				printf 'T\t%s\t%s\t%s\t%s\n' "$t" "$u" "$(cmd_key builder "$t")" "$(cmd_key kernel "$t")"
 				printf 'U\t%s\t%s\t%s\n' "$u" "$(cmd_key builder "u-$u")" "$(cmd_key userland "$u")"
 			done
@@ -520,6 +607,7 @@ for line in sys.stdin:
             k = f[7 + 4 * i: 11 + 4 * i]
             j[l] = {"user_key": k[0], "user_dir": k[1], "kmod_key": k[2], "kmod_dir": k[3]} if k and k[0] else None
         j["inputs"] = f[15]
+        j["base"] = f[16] if len(f) > 16 else ""   # "" or ext-HASH (BASE=ext)
         jobs.append(j)
     elif f[0] == "T": targets[f[1]] = {"target": f[1], "userland": f[2], "builder_key": f[3], "kernel_key": f[4]}
     elif f[0] == "U": users[f[1]] = {"userland": f[1], "builder_key": f[2], "userland_key": f[3]}
@@ -567,6 +655,8 @@ cmd_inputs() {
 		echo "EXTRA=$(rextra "$id")"
 		for l in repro fixed; do echo "$l=$(build_of "$id" "$l")"; done
 		cmd_key kernel "$t"; [ "$(tconf "$t" OS)" = Linux ] && cmd_key userland "$u"
+		# BASE=ext: the extended layers (its key covers the ext userland's)
+		[ "$(rbase "$id")" = ext ] && [ "$(tconf "$t" OS)" = Linux ] && cmd_key kernel-ext "$t"
 		hashof runtime/Containerfile runtime/prune.sh runtime/zfs-repro-vm
 		hashof builder/in/demo-disk.sh builder/in/zts-pack.sh builder/in/zts-run.sh builder/in/zts-udevadm builder/in/zts-sudo builder/in/zvol_name.c builder/in/build-disk.sh \
 		    builder/in/demo-common.sh builder/in/python-stdlib.sh builder/in/fio.sh builder/in/zfs.sh builder/in/guest/zr builder/zts-tools.txt \
@@ -576,7 +666,12 @@ cmd_inputs() {
 cmd_key() {	# cache keys: what each output depends on
 	local u t rs
 	case $1 in
-	userland) echo "userland-$(hashof builder/in/userland.sh builder/in/demo-common.sh "builder/Containerfile.$(uconf "$2" FAMILY)" "userlands/$2/userland.conf")" ;;
+	userland) if [ -n "$(uconf "$2" PARENT)" ]; then	# an extended userland: its own inputs and its parent's
+	             echo "userland-$( { hashof builder/in/userland-ext.sh builder/in/fio.sh builder/in/zvol_name.c "userlands/$2/userland.conf"; cmd_key userland "$(uconf "$2" PARENT)"; } | sha256sum | cut -c1-16)"
+	             return
+	          fi
+	     echo "userland-$(hashof builder/in/userland.sh builder/in/demo-common.sh "builder/Containerfile.$(uconf "$2" FAMILY)" "userlands/$2/userland.conf")" ;;
+	kernel-ext) echo "kernel-ext-$2-$(kver "$2")-$( { hashof builder/in/kernel-ext.sh builder/in/kernel-ext-modules.sh; cmd_key kernel "$2"; cmd_key userland "$(xuserland_of "$2")"; } | sha256sum | cut -c1-16)" ;;
 	kernel) echo "kernel-$2-$(kver "$2")-$(hashof builder/in/kernel.sh builder/in/kernel-stage.sh "builder/Containerfile.$(tconf "$2" FAMILY)" "bases/$2/base.conf")" ;;
 	builder) case $2 in
 	         u-*) echo "builder-$2-$(hashof "builder/Containerfile.$(uconf "${2#u-}" FAMILY)" builder/in/kernel-stage.sh "userlands/${2#u-}/userland.conf")" ;;
@@ -622,6 +717,9 @@ case $c in
 builder) cmd_builder "$@" ;;
 builder-load) cmd_builder_load "$@" ;;
 userland | kernel | demo | disks | images | push | plan | key | sizes | verify | inputs | resolve) "cmd_$c" "$@" ;;
+userland-ext) cmd_userland_ext "$@" ;;
+kernel-ext) cmd_kernel_ext "$@" ;;
+base) base_of "$@" ;;
 zfs-user) cmd_zfs user "$@" ;;
 zfs-kmod) cmd_zfs kmod "$@" ;;
 zfs-for) cmd_zfs_for "$@" ;;
@@ -636,7 +734,10 @@ all)
 	ts=("$@"); [ ${#ts[@]} -gt 0 ] || read -ra ts <<<"$(targets_of "$id" | tr '\n' ' ')"
 	resolve_id "$id" fresh || exit 1
 	echo "builds of $id:"; for l in $(labels "$id"); do echo "  $l: ${RESOLVED[$id/$l]}  ($(rconf "$id" "BUILD_$l"))"; done
-	for t in "${ts[@]}"; do cmd_userland "$(userland_of "$t")"; cmd_kernel "$t"; done
+	for t in "${ts[@]}"; do
+		cmd_userland "$(userland_of "$t")"; cmd_kernel "$t"
+		if [ "$(rbase "$id")" = ext ] && [ "$(tconf "$t" OS)" = Linux ]; then cmd_kernel_ext "$t"; fi
+	done
 	cmd_zfs_for "$id" "${ts[@]}"
 	cmd_demo "$id"
 	cmd_disks "$id" "${ts[@]}"

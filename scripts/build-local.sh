@@ -6,8 +6,12 @@
 # RESULT.  The build specs are resolved first (builder/build.sh resolve): a
 # job is skipped when every image's tag is on GHCR and its build label
 # (io.github.wrouesnel.zfs-repro.build, read with skopeo inspect) is the
-# commit its spec resolves to now.  Otherwise it is built, checked and
-# pushed, replacing the tags.  FORCE=1 builds every job.
+# commit its spec resolves to now, and its base label
+# (io.github.wrouesnel.zfs-repro.base: none for the standard base, ext-HASH
+# for BASE='ext', HASH the extended layers' key) is what builder/build.sh
+# base says now, so a reproducer switched to BASE='ext', or one whose
+# extended layers changed, is built again.  Otherwise it is built, checked
+# and pushed, replacing the tags.  FORCE=1 builds every job.
 # Logs: work/local/LOG and work/local/ID/TARGET.log; results rows (as the
 # old CI wrote them) go to work/local/results.tsv.
 # ONLY_IDS limits the reproducers, as for builder/build.sh; FIRST_IDS (space
@@ -39,11 +43,11 @@ if [ -n "${FIRST_IDS:-}" ]; then
 	ids=$( { for id in $FIRST_IDS; do grep -qxF "$id" <<<"$ids" && echo "$id"; done; echo "$ids"; } | awk '!seen[$0]++')
 fi
 published=$(skopeo list-tags "docker://$IMAGE" 2>/dev/null | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["Tags"]))')
-# the build label of a published tag ("" if none)
-pub_build() {
+# the build and base labels of a published tag ("BUILD<tab>BASE", "" if none)
+pub_labels() {
 	grep -qxF "$1" <<<"$published" || return 0
 	skopeo inspect --no-tags "docker://$IMAGE:$1" 2>/dev/null |
-	    python3 -c 'import json,sys; print((json.load(sys.stdin).get("Labels") or {}).get("io.github.wrouesnel.zfs-repro.build", ""))'
+	    python3 -c 'import json,sys; l = json.load(sys.stdin).get("Labels") or {}; p = "io.github.wrouesnel.zfs-repro."; print(l.get(p + "build", "") + "\t" + l.get(p + "base", ""))'
 }
 
 for t in "${ts[@]}"; do
@@ -54,11 +58,12 @@ for t in "${ts[@]}"; do
 			log "not built $id $t: cannot resolve: $(echo "$res" | tr '\n' ' ' | cut -c1-200)"
 			continue
 		fi
-		need= why=
+		need= why= wbase=$($B base "$id" "$t")
 		while read -r l want _; do
 			tag=$($B tag "$id" "$l" "$t")
-			have=$(pub_build "$tag")
+			IFS=$'\t' read -r have hbase <<<"$(pub_labels "$tag")"
 			[ "$have" = "$want" ] || { need=1; why="$why $l: ${have:-not on GHCR} -> ${want#https://github.com/}"; }
+			[ -z "$have" ] || [ "$hbase" = "$wbase" ] || { need=1; why="$why $l: base ${hbase:-standard} -> ${wbase:-standard}"; }
 		done <<<"$res"
 		[ -n "$need" ] || [ -n "${FORCE:-}" ] || { log "skip $id $t (on GHCR, builds$(awk '{ printf " %s %s", $1, substr($2, length($2) - 39, 10) }' <<<"$res"))"; continue; }
 		mkdir -p "$OUT/$id"

@@ -102,9 +102,19 @@ EOS
 		[ -e /usr/libexec/zfs/zed.d ] || ln -s /zfs/zed/libexec /usr/libexec/zfs/zed.d
 	fi
 	# udev's part: /dev/zfs for every user (90-zfs.rules, MODE 0666), and
-	# the /dev/zvol links (zts-udevadm), kept up to date
+	# the /dev/zvol links (zts-udevadm), kept up to date; the extended
+	# userland (BASE=ext) runs udev itself
 	chmod 0666 /dev/zfs
-	( while :; do udevadm; sleep 0.3; done ) >/dev/null 2>&1 &
+	if [ ! -S /run/udev/control ]; then
+		( while :; do udevadm; sleep 0.3; done ) >/dev/null 2>&1 &
+	elif ls /demo/udev/*.rules >/dev/null 2>&1; then
+		# the reproducer's own udev rules (reproducers/ID/udev/*.rules),
+		# e.g. a slower probe that widens a race udev takes part in
+		mkdir -p /run/udev/rules.d
+		cp /demo/udev/*.rules /run/udev/rules.d/
+		udevadm control --reload
+		echo "# udev rules added by this reproducer: $(cd /demo/udev && echo *.rules)"
+	fi
 	echo "# ZTS of $(cat "$S/commit")"
 	echo "# DISKS=$DISKS (4 GiB sparse files on $FILEDIR${DEMO_DISK:+, $DEMO_DISK})"
 }
