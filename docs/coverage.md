@@ -23,6 +23,7 @@ printed the expected RESULT for both images on this machine.
 | fix-hasrecvd-spa-open | #32 | PR #19306 (open) | console demo | has reproducer |  |
 | fix-mmap-eof-extend | #27 | PR #19267 (open) | console demo | has reproducer |  |
 | fix-mmp-first-txg-delay |  |  | console demo | has reproducer |  |
+| fix-offline-removed-statechange | #211 | issue #16383 | ZTS test | has reproducer | BASE='ext' (scsi_debug); ubuntu24: the break posts no REMOVED -> OFFLINE statechange (RESULT BUG), the fix does (RESULT OK) |
 | fix-partial-read-redirty | #22 | PR #19299 (open) | console demo | has reproducer |  |
 | fix-partial-read-redirty-v2 |  |  | console demo | has reproducer |  |
 | fix-raw-send-redact-bookmark-eacces | #70 |  | console demo | has reproducer |  |
@@ -74,10 +75,10 @@ printed the expected RESULT for both images on this machine.
 | fix-zcp-clone-namecheck | #37 | PR #19311 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zcp-snapshot-namecheck | #33 | PR #19307 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zed-events-eintr | #135 | issue #14720 | console demo | added now | ubuntu24: repro BUG, fixed OK |
-| fix-zed-retire-leaks | #18 | PR #19333 (open) | ZTS test | blocked | the test needs valgrind (Ubuntu’s package is about 80 MB) to see the leaks (reproducer kept, left out of CI: BLOCKED) |
+| fix-zed-retire-leaks | #18 | PR #19333 (open) | ZTS test | has reproducer | BASE='ext' (valgrind); ubuntu24: the break's ZED leaks in zfs_retire under valgrind (RESULT BUG), the fix passes (RESULT OK). Was blocked for valgrind until the extended base (2026-10-21) |
 | fix-zfs-bookmark-recursive-target | #14 | PR #19298 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zfs-vget-snapshot-ctldir | #6 | PR #19290 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
-| fix-zil-crash-keep-first | #46 | PR #19320 (closed) | ZTS test | blocked | the test needs the scsi_debug module; the targets’ kernels carry no module tree (reproducer kept, left out of CI: BLOCKED) |
+| fix-zil-crash-keep-first | #46 | PR #19320 (closed) | ZTS test | has reproducer | BASE='ext' (scsi_debug); ubuntu24: the break leaks 8192 bytes in zdb -b (RESULT BUG), the fix passes (RESULT OK). Was blocked for the module tree until the extended base (2026-10-21) |
 | fix-zil-crash-stale-header | #126 |  | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zil-dmu-sync-alloc-hole | #58 | PR #19334 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zoned-uid-prop | #12 | PR #19297 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
@@ -89,7 +90,7 @@ printed the expected RESULT for both images on this machine.
 | fix-zts-autotrim-config-wait | #82 |  | ZTS test | blocked | a CI-load flake (#82: fedora43, almalinux8, ubuntu26 under load); passes on ubuntu24 here, as in zfs-bug-hunt’s 30 local runs (reproducer kept, left out of CI: BLOCKED) |
 | fix-zts-dev-removal-condense | #49 | PR #19291 (merged) | ZTS test | blocked | a flake (#49: 20 in 100 runs in zfs-bug-hunt’s VMs); 0 failures in 15 runs with 2 vCPUs and 20 with 8 on ubuntu24 here (reproducer kept, left out of CI: BLOCKED) |
 | fix-zts-dio-read-verify-decline | #80 |  | ZTS test | blocked | a CI-load flake (#80: 1 in 20 runs with 4 CPU hogs); 0 failures in 20 runs with 8 vCPUs on ubuntu24 here (reproducer kept, left out of CI: BLOCKED) |
-| fix-zts-errata3-busy | #130 |  | ZTS test | blocked | the flake needs udev’s watch rule opening the zvol after dd (#130); the demo VM has no udev (reproducer kept, left out of CI: BLOCKED) |
+| fix-zts-errata3-busy | #130 |  | ZTS test | has reproducer | BASE='ext' (udev's watch rule); udev's probe is too quick in the VM (0 failures in 20 runs), so the reproducer's udev rule holds the zvol open 2 s on it; ubuntu24: the break's export fails "pool is busy" (RESULT BUG), the fix passes (RESULT OK). Was blocked for udev until the extended base (2026-10-21) |
 | fix-zts-l2arc-dwpd-reimport-lowmem | flake table #54 | PR #19339 (merged) | ZTS test | blocked | a FreeBSD low-memory flake (flake table #54); passes on ubuntu24; FreeBSD ZTS images aren’t built yet (reproducer kept, left out of CI: BLOCKED) |
 | fix-zts-l2arc-l2miss-order | flake table #53 | PR #19338 (merged) | ZTS test | blocked | a FreeBSD flake (flake table #53); passes on ubuntu24; FreeBSD ZTS images aren’t built yet (reproducer kept, left out of CI: BLOCKED) |
 | fix-zts-mmp-zhack-import-wait | #138 |  | ZTS test | blocked | a race seen 1 in 20 runs under CPU load (#138), 4 minutes a run; passes on ubuntu24 (reproducer kept, left out of CI: BLOCKED) |
