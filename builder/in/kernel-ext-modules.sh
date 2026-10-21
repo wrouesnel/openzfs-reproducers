@@ -31,14 +31,25 @@ case " $ID ${ID_LIKE:-} " in
 	ubuntu) want="linux-modules-$K linux-modules-extra-$K" ;;
 	*) want="linux-image-$K" ;;
 	esac
-	retry apt-get update -qq >/dev/null
+	# the .debs are kept in /work/cache/kmods (a pinned kernel's packages
+	# don't change); the archive (Ubuntu's snapshot service) is retried
+	C=/work/cache/kmods; [ -d /work ] || C=$W/cache
+	mkdir -p "$C"
 	for p in $want; do
-		if ! retry apt-get download -qq "$p" 2>"$W/err"; then
+		ls "$C/${p}_"*.deb >/dev/null 2>&1 && continue
+		got=
+		for i in 1 2 3 4 5 6 7 8; do
+			if apt-get update -qq >/dev/null 2>&1 && (cd "$C" && apt-get download -qq "$p") 2>"$W/err"; then got=1; break; fi
 			# Ubuntu: not every kernel flavour has an -extra package
-			case $p in linux-modules-extra-*) grep -q 'Unable to locate\|No packages found\|has no installation candidate' "$W/err" && continue ;; esac
-			cat "$W/err" >&2; exit 1
-		fi
+			case $p in linux-modules-extra-*)
+				# (only when the index is there: it knows linux-modules-K)
+				apt-cache show "linux-modules-$K" >/dev/null 2>&1 && grep -q 'Unable to locate\|No packages found\|has no installation candidate' "$W/err" && { got=-; break; } ;;
+			esac
+			echo "apt: retry $i ($p)" >&2; sleep $((i * 15))
+		done
+		[ -n "$got" ] || { cat "$W/err" >&2; exit 1; }
 	done
+	for p in $want; do f=$(ls "$C/${p}_"*.deb 2>/dev/null | tail -1) && [ -n "$f" ] && cp "$f" "$W/"; done
 	for d in *.deb; do dpkg -x "$d" "$R"; dpkg-deb -W --showformat='${Package} ${Version} ${source:Package}\n' "$d"; done >"$O/modules-pkg.txt"
 	;;
 *" rhel "* | *" fedora "* | *" centos "*)
