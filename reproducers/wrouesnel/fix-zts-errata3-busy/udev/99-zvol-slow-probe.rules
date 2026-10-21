@@ -1,0 +1,7 @@
+# zfs-repro (fix-zts-errata3-busy): udev's watch rule (60-block.rules) makes
+# udev probe a zvol again when a writer closes it, holding it open.  In this
+# small VM that probe takes milliseconds; on CI's Fedora and Ubuntu VMs it
+# took long enough that the export the test runs 0.2 s after its dd failed
+# with "pool is busy".  Holding the zvol open for 2 s on that "change" event
+# makes the race as wide as there, as the fix's author did to verify it.
+ACTION=="change", SUBSYSTEM=="block", KERNEL=="zd*", RUN+="/bin/sh -c 'exec 3<$env{DEVNAME}; sleep 2'"
