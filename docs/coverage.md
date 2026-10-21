@@ -74,6 +74,7 @@ printed the expected RESULT for both images on this machine.
 | fix-zarcsummary-connreset | #124 |  | console demo | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zcp-clone-namecheck | #37 | PR #19311 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zcp-snapshot-namecheck | #33 | PR #19307 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
+| fix-zdb-simulated-ddt-errors | #194 | PR #19509 (open) | console demo | added now | ubuntu24: repro BUG (zdb -S exits 0 with an empty histogram), fixed OK (exit 52, "histogram is incomplete" on stderr), 3/3 each |
 | fix-zed-events-eintr | #135 | issue #14720 | console demo | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zed-retire-leaks | #18 | PR #19333 (open) | ZTS test | has reproducer | BASE='ext' (valgrind); ubuntu24: the break's ZED leaks in zfs_retire under valgrind (RESULT BUG), the fix passes (RESULT OK). Was blocked for valgrind until the extended base (2026-10-21) |
 | fix-zfs-bookmark-recursive-target | #14 | PR #19298 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
