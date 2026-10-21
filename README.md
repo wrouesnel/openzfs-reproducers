@@ -210,14 +210,18 @@ runs (`--runs`) work for these too.
 - Every published image is built and checked with `builder/build.sh` (see
   "Building"), on the maintainer's machine since 2026-10-20 (it was GitHub CI
   before; [docs/ci.md](docs/ci.md) says why). It builds the userland, each
-  target's kernel, every OpenZFS build (from the commits pinned in
-  `reproducers/USER/SLUG/reproducer.conf`, checked to be public) and the
-  images. It then runs both images of each pair in a VM with `--check`, and
+  target's kernel, every OpenZFS build (from the fix branch named in
+  `reproducers/USER/SLUG/reproducer.conf`: the build specs `BUILD_repro` and
+  `BUILD_fixed`, usually the branch's test commit and its head, are resolved
+  to commits at build time and checked to be public) and the images. It then runs both images of each pair in a VM with `--check`, and
   pushes only if both print their expected RESULT. The image's
   `org.opencontainers.image.revision` label is this repository's commit.
 - The labels and annotations name the OpenZFS commit of the build
-  (`io.github.wrouesnel.zfs-repro.build`), the fix branch, the target and
-  kernel, and the expected result: `podman inspect` or `skopeo inspect`.
+  (`io.github.wrouesnel.zfs-repro.build`, `REPO@SHA`; the spec it was
+  resolved from is `io.github.wrouesnel.zfs-repro.build-spec`), the fix
+  branch, the target and kernel, and the expected result: `podman inspect`
+  or `skopeo inspect`. When a branch moves, its images are rebuilt from the
+  new commits and the tags replaced.
 - Inside the VM, `/etc/zfshunt-build` and the motd name the loaded build
   (`<short sha> <subject>`, `zfs <version> srcversion <x>`). The base refuses
   a module whose srcversion differs.

@@ -6,11 +6,13 @@
 # break and on the fix (docs/reproducer-format.md, "ZTS reproducers").
 #
 # From the branch's commits on top of openzfs/zfs master it takes:
-#   BUILD_fixed  the branch head
+#   BUILD_fixed  the branch head (spec REPO@BRANCH)
 #   BUILD_repro  the commit before the first commit that changes code
-#                (the test-only commit of a "test, then fix" branch), or the
-#                master commit the branch is based on when every commit is
-#                test-only (a ZTS fix: master runs the original test)
+#                (the test-only commit of a "test, then fix" branch:
+#                REPO@BRANCH~N), or the master commit the branch is based on
+#                when every commit is test-only (a ZTS fix: master runs the
+#                original test; openzfs/zfs@merge-base(BRANCH))
+# (build specs: docs/reproducer-format.md; builder/build.sh resolves them)
 #   ZTS_TESTS    the .ksh tests the branch adds or changes (setup/cleanup
 #                and helpers excluded); -t TEST (tests/functional/G/NAME)
 #                replaces them, e.g. when only a .kshlib changed
@@ -115,16 +117,16 @@ mkdir -p "$D"
 	if [ $kind = fix ]; then
 		if [ "$repro" = "$mb" ]; then
 			echo "# repro = the openzfs/zfs master commit the branch is based on; fixed = the branch head"
-			echo "BUILD_repro='https://github.com/openzfs/zfs@$repro'"
+			echo "BUILD_repro=$(q "https://github.com/openzfs/zfs@merge-base($BR)")"
 		else
 			echo "# repro = the branch's test commit (the test, no fix); fixed = the branch head"
-			echo "BUILD_repro='$REPO@$repro'"
+			echo "BUILD_repro=$(q "$REPO@$BR~$(git -C "$G" rev-list --first-parent --count "$repro..$head")")"
 		fi
 	else
 		echo "# a test-only (ZTS) fix: repro = master with the original test; fixed = the branch head"
-		echo "BUILD_repro='https://github.com/openzfs/zfs@$repro'"
+		echo "BUILD_repro=$(q "https://github.com/openzfs/zfs@merge-base($BR)")"
 	fi
-	echo "BUILD_fixed='$REPO@$head'"
+	echo "BUILD_fixed=$(q "$REPO@$BR")"
 	echo "CONFIGURE='--enable-debug'"
 	echo "# KIND=zts: the demo runs these ZTS tests, from each build's own commit"
 	echo "KIND='zts'"

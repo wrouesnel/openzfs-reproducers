@@ -3,7 +3,11 @@
 # reproducer locally (docs/ci.md), one reproducer x target job at a time,
 # TARGETs in the order given (default: ubuntu24, then every other Linux
 # target).  A pair is pushed only when both images print their expected
-# RESULT.  A job whose images are already on GHCR is skipped unless FORCE=1.
+# RESULT.  The build specs are resolved first (builder/build.sh resolve): a
+# job is skipped when every image's tag is on GHCR and its build label
+# (io.github.wrouesnel.zfs-repro.build, read with skopeo inspect) is the
+# commit its spec resolves to now.  Otherwise it is built, checked and
+# pushed, replacing the tags.  FORCE=1 builds every job.
 # Logs: work/local/LOG and work/local/ID/TARGET.log; results rows (as the
 # old CI wrote them) go to work/local/results.tsv.
 # ONLY_IDS limits the reproducers, as for builder/build.sh; FIRST_IDS (space
@@ -35,18 +39,31 @@ if [ -n "${FIRST_IDS:-}" ]; then
 	ids=$( { for id in $FIRST_IDS; do grep -qxF "$id" <<<"$ids" && echo "$id"; done; echo "$ids"; } | awk '!seen[$0]++')
 fi
 published=$(skopeo list-tags "docker://$IMAGE" 2>/dev/null | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["Tags"]))')
+# the build label of a published tag ("" if none)
+pub_build() {
+	grep -qxF "$1" <<<"$published" || return 0
+	skopeo inspect --no-tags "docker://$IMAGE:$1" 2>/dev/null |
+	    python3 -c 'import json,sys; print((json.load(sys.stdin).get("Labels") or {}).get("io.github.wrouesnel.zfs-repro.build", ""))'
+}
 
 for t in "${ts[@]}"; do
 	for id in $ids; do
 		$B targets "$id" | grep -qx "$t" || continue
-		need=0
-		for l in $($B labels "$id"); do
-			grep -qxF "$($B tag "$id" "$l" "$t")" <<<"$published" || need=1
-		done
-		[ "$need" = 1 ] || [ -n "${FORCE:-}" ] || { log "skip $id $t (on GHCR)"; continue; }
+		# resolve the specs once for this job; `all` builds what this saved
+		if ! res=$($B resolve "$id" 2>&1); then
+			log "not built $id $t: cannot resolve: $(echo "$res" | tr '\n' ' ' | cut -c1-200)"
+			continue
+		fi
+		need= why=
+		while read -r l want _; do
+			tag=$($B tag "$id" "$l" "$t")
+			have=$(pub_build "$tag")
+			[ "$have" = "$want" ] || { need=1; why="$why $l: ${have:-not on GHCR} -> ${want#https://github.com/}"; }
+		done <<<"$res"
+		[ -n "$need" ] || [ -n "${FORCE:-}" ] || { log "skip $id $t (on GHCR, builds$(awk '{ printf " %s %s", $1, substr($2, length($2) - 39, 10) }' <<<"$res"))"; continue; }
 		mkdir -p "$OUT/$id"
-		log "build $id $t"
-		if $B all "$id" "$t" >"$OUT/$id/$t.log" 2>&1; then
+		log "build $id $t${why:+ ($why )}"
+		if REUSE_RESOLVED=1 $B all "$id" "$t" >"$OUT/$id/$t.log" 2>&1; then
 			if $B push "$id" "$t" >>"$OUT/$id/$t.log" 2>&1; then
 				log "pushed $id $t"
 			else

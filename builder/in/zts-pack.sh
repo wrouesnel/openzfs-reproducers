@@ -1,5 +1,5 @@
 #!/bin/bash
-# zts-pack.sh REPRODUCER.CONF ROOT   (userland builder, root; needs network)
+# zts-pack.sh REPRODUCER.CONF ROOT [RESOLVED]   (userland builder, root; needs network)
 # The ZTS part of a KIND=zts reproducer's demo disk.  For each build (repro,
 # fixed) it takes, from that build's own commit, the ZTS pieces that the
 # tests in ZTS_TESTS need, and writes them to ROOT/zts/LABEL/:
@@ -17,17 +17,19 @@
 # and the fix both carry the new test; for a test-only fix, master's
 # original test against the fixed one.  The tools (zfs-tests/bin helpers)
 # come with each build (TOOLS: the ones the tests use, or '@zts' for all).
+# RESOLVED: the file with the commits BUILD_repro and BUILD_fixed resolved to
+# (builder/build.sh resolve); without it they must be pins (REPO@SHA).
 set -euo pipefail
-RC=${1:?reproducer.conf} R=${2:?root}
+RC=${1:?reproducer.conf} R=${2:?root} RES=${3:-${1}}
 conf() { (set +u; . "$1"; eval "printf '%s' \"\${$2:-}\""); }
 TESTS=$(conf "$RC" ZTS_TESTS)
 [ -n "$TESTS" ] || { echo "KIND=zts needs ZTS_TESTS" >&2; exit 1; }
 W=$(mktemp -d /tmp/zts.XXXXXX)
 for L in repro fixed; do
-	rs=$(conf "$RC" "BUILD_$L"); [ -n "$rs" ] || continue
+	rs=$(conf "$RES" "BUILD_$L"); [ -n "$rs" ] || continue
 	# ZTS_SCRIPTS=fixed: both builds run the fix head's scripts (a branch
 	# whose test came with, or after, the fix)
-	[ "$(conf "$RC" ZTS_SCRIPTS)" = fixed ] && rs=$(conf "$RC" BUILD_fixed)
+	[ "$(conf "$RC" ZTS_SCRIPTS)" = fixed ] && rs=$(conf "$RES" BUILD_fixed)
 	repo=${rs%@*} sha=${rs##*@} G=$W/$L O=$R/zts/$L
 	git init -q "$G"
 	git -C "$G" remote add origin "$repo"

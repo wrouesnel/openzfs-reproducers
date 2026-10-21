@@ -11,7 +11,8 @@
 #       userland of that release.  Writes work/targets/TARGET/.
 #   scripts/freebsd-image.sh repro ID TARGET REPRO.qcow2 REPRO.manifest
 #       ID: reproducers/USER/SLUG; the manifest's builds bug= and fix= must be
-#       its BUILD_repro and BUILD_fixed commits (checked by sha prefix).  The
+#       the commits its BUILD_repro and BUILD_fixed specs resolve to now
+#       (builder/build.sh resolve; checked by sha prefix).  The
 #       FreeBSD disk holds the demo and both builds; each image gets the whole
 #       disk and boots its own build (LEGACY_LABEL).  Writes work/demos/ID and
 #       work/builds/ID/TARGET/{repro,fixed}.
@@ -69,9 +70,12 @@ repro)
 	[ "$(conf "$man" KERNEL)" = "$(conf "$WORK/targets/$t/base.conf" KERNEL)" ] ||
 	    { echo "the reproducer is for kernel $(conf "$man" KERNEL), $t has $(conf "$WORK/targets/$t/base.conf" KERNEL)" >&2; exit 1; }
 	[ -f "$rd/host.sh" ] && { echo "host.sh: FreeBSD targets have no host channel yet" >&2; exit 1; }
+	# the build specs, resolved (saved for builder/build.sh images too)
+	"$B" resolve "$id" >/dev/null
+	res=$WORK/resolved/${id//\//-}.conf
 	for p in repro:bug fixed:fix; do
 		l=${p%%:*} ll=${p#*:}
-		want=$(conf "$rc" "BUILD_$l"); want=${want##*@}
+		want=$(conf "$res" "BUILD_$l"); want=${want##*@}
 		have=$(conf "$man" "BUILD_$ll" | cut -d' ' -f1)
 		[ -n "$have" ] && [ "${want#"$have"}" != "$want" ] ||
 		    { echo "build $l: the disk has '$have' as $ll, reproducer.conf wants $want" >&2; exit 1; }
@@ -81,6 +85,7 @@ repro)
 	{
 		echo "# reproducer $id (reproducers/$id/reproducer.conf)"
 		grep -v -e '^#' -e '^$' "$rc"
+		for l in repro fixed; do echo "SPEC_$l=$(q "$(conf "$rc" "BUILD_$l")")"; echo "BUILD_$l=$(q "$(conf "$res" "BUILD_$l")")"; done
 		echo "ID=$(q "$id")"
 		echo "DISK_BYTES=$(numfmt --from=iec "$(conf "$rc" DISK_SIZE)")"
 	} >"$d/repro.conf"
@@ -102,7 +107,8 @@ repro)
 			echo "LEGACY_LABEL=$(q "$ll")"
 			echo "TARGET=$(q "$t")"
 			echo "KERNEL=$(q "$(conf "$man" KERNEL)")"
-			echo "BUILD=$(q "$(conf "$rc" "BUILD_$l")")"
+			echo "BUILD=$(q "$(conf "$res" "BUILD_$l")")"
+			echo "SPEC=$(q "$(conf "$rc" "BUILD_$l")")"
 			echo "MARKER=$(q "$(conf "$man" "BUILD_$ll")")"
 			echo "ZFS=''"
 			for k in EXPECT EXPECT_INSPECT RUNS MIN_MATCH; do echo "$k=$(q "$(conf "$rc" "${k}_$l")")"; done
@@ -111,7 +117,7 @@ repro)
 		{
 			echo "SOURCES for the OpenZFS build '$l' of $id on target $t"
 			echo
-			echo "  commit: $(conf "$rc" "BUILD_$l" | sed 's|@|/commit/|')"
+			echo "  commit: $(conf "$res" "BUILD_$l" | sed 's|@|/commit/|')"
 			echo "  $(conf "$man" "BUILD_$ll")"
 			echo "  configure: $(conf "$rc" CONFIGURE), built on FreeBSD $(conf "$man" KERNEL)"
 			echo

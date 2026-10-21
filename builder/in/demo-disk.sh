@@ -1,5 +1,5 @@
 #!/bin/bash
-# demo-disk.sh ID REPRODIR USERLANDDIR OUTDIR   (userland builder, root)
+# demo-disk.sh ID REPRODIR USERLANDDIR OUTDIR [RESOLVED]   (userland builder, root)
 # Packs the demo disk of reproducer ID (USER/SLUG): everything about it that
 # doesn't depend on the OpenZFS build or the kernel, so every image of the
 # reproducer (repro-/fixed-, every target) shares this layer.
@@ -10,8 +10,11 @@
 # The userland mounts it read-only on /demo.  Writes
 #   OUTDIR/demo.qcow2  OUTDIR/repro.conf  OUTDIR/demo.sh [inspect.sh host.sh]
 #   OUTDIR/SOURCES.txt
+# RESOLVED (builder/build.sh: work/resolved/USER-SLUG.conf) holds the commits
+# the build specs BUILD_repro and BUILD_fixed resolved to; repro.conf gets
+# them (BUILD_*) after the specs (SPEC_*), and the ZTS scripts come from them.
 set -euo pipefail
-ID=${1:?id} RD=${2:?reprodir} UD=${3:?userlanddir} O=${4:?outdir}
+ID=${1:?id} RD=${2:?reprodir} UD=${3:?userlanddir} O=${4:?outdir} RES=${5:-}
 W=$(mktemp -d /tmp/demo.XXXXXX) R=$W/root
 mkdir -p "$R"/{bin,lib} "$O"
 rm -rf "$O"/*
@@ -21,6 +24,12 @@ RC=$RD/reproducer.conf
 {
 	echo "# reproducer $ID (reproducers/$ID/reproducer.conf)"
 	grep -v -e '^#' -e '^$' "$RC"
+	if [ -n "$RES" ]; then
+		for l in repro fixed; do
+			echo "SPEC_$l=$(q "$(conf "$RC" "BUILD_$l")")"
+			echo "BUILD_$l=$(q "$(conf "$RES" "BUILD_$l")")"
+		done
+	fi
 	echo "ID=$(q "$ID")"
 	echo "USERLAND=$(q "$(conf "$UD/userland.conf" NAME)")"
 	echo "DISK_BYTES=$(numfmt --from=iec "$(conf "$RC" DISK_SIZE)")"
@@ -33,7 +42,7 @@ done
 # (zts-run.sh) as demo.sh, with the tests it runs appended for reading
 KIND=$(conf "$RC" KIND) BINS=$(cat "$RD/bins" 2>/dev/null || true) PKGS=$(conf "$RC" EXTRA_PKGS)
 if [ "$KIND" = zts ]; then
-	bash "$(dirname "$0")/zts-pack.sh" "$RC" "$R"
+	bash "$(dirname "$0")/zts-pack.sh" "$RC" "$R" $RES
 	{
 		cat "$(dirname "$0")/zts-run.sh"
 		l=fixed; [ -f "$R/zts/fixed/tests.list" ] || l=repro

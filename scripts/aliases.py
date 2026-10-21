@@ -138,6 +138,18 @@ def branch_issues(c, sha):
     return nums, date
 
 
+def built(label, uid, slug, rest, cache={}):
+    """the commit a published image was built from: the sha of its build label
+    (io.github.wrouesnel.zfs-repro.build, REPO@SHA; reproducer.conf names a
+    spec such as a branch, resolved when the image was built)"""
+    tag = tag_of(label, uid, slug, rest)
+    if tag not in cache:
+        out = subprocess.run(["skopeo", "inspect", "--no-tags", f"docker://{IMAGE}:{tag}"], capture_output=True, text=True)
+        labels = (json.loads(out.stdout).get("Labels") or {}) if out.returncode == 0 else {}
+        cache[tag] = labels.get("io.github.wrouesnel.zfs-repro.build", "").rsplit("@", 1)[-1]
+    return cache[tag]
+
+
 def merge_base(c, sha):
     repo = c["REPO"].rstrip("/").removesuffix(".git").split("github.com/")[-1]
     try:
@@ -171,24 +183,35 @@ def main():
         rests = [r for r in rests if not c.get("BUILD_fixed") or tag_of("fixed", uid, slug, r) in have]
         if not rests or not c.get("BUILD_fixed"):
             continue
-        fixed_sha = c["BUILD_fixed"].rsplit("@", 1)[1]
-        repro_sha = c["BUILD_repro"].rsplit("@", 1)[1]
+        # what each target's pair was built from (targets can lag behind
+        # while a moved branch is rebuilt); the newest build first
+        builds = {r: (built("repro", uid, slug, r), built("fixed", uid, slug, r)) for r in rests}
+        rests = [r for r in rests if all(builds[r])]
+        if not rests:
+            continue
+        fixed_sha = builds[rests[0]][1]
+        for r in rests:
+            if r.startswith("ubuntu24-"):
+                fixed_sha = builds[r][1]
         prs = prs_for(c)
         issues = {int(n) for n in c.get("ISSUES", "").split()}
         closes = set()
         for n, pr in sorted(prs.items()):
-            if pr["head"]["sha"] != fixed_sha:
-                print(f"{rid}: PR #{n} head {pr['head']['sha'][:12]} is not the built fix {fixed_sha[:12]}: no PR aliases until it is built and passes")
+            ok = [r for r in rests if builds[r][1] == pr["head"]["sha"]]
+            if not ok:
+                print(f"{rid}: PR #{n} head {pr['head']['sha'][:12]} is not a built fix ({', '.join(sorted({b[1][:12] for b in builds.values()}))}): no PR aliases until it is built and passes")
                 continue
             # the break must be the PR's own test commit or the master it is based on
             try:
                 shas = {x["sha"] for x in api(f"repos/{UPSTREAM}/pulls/{n}/commits?per_page=100")}
             except Exception:
                 shas = set()
-            if repro_sha in shas or repro_sha == pr["base"]["sha"] or repro_sha == merge_base(c, fixed_sha):
-                plan.append((rid, f"pr{n}", rests))
+            mb = merge_base(c, pr["head"]["sha"])
+            good = [r for r in ok if builds[r][0] in shas or builds[r][0] in (pr["base"]["sha"], mb)]
+            if good:
+                plan.append((rid, f"pr{n}", good))
             else:
-                print(f"{rid}: PR #{n}: the break {repro_sha[:12]} is neither a PR commit nor its base: no PR aliases")
+                print(f"{rid}: PR #{n}: the break is neither a PR commit nor its base: no PR aliases")
             cl = closing_issues(pr)
             closes |= cl
             issues |= cl

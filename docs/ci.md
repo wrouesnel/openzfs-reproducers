@@ -13,9 +13,22 @@ the same script the workflow ran:
     builder/build.sh push USER/SLUG TARGET [LABEL...]   # only after both checks pass
 
 `scripts/build-local.sh [TARGET...]` runs every committed reproducer that way,
-one job at a time (ubuntu24 first), skipping images already on GHCR, and logs
-to `work/local/`. A pair is pushed only when the break prints its expected `RESULT BUG` and the
-fix prints `RESULT OK` on that kernel, as before.
+one job at a time (ubuntu24 first), and logs to `work/local/`. A pair is
+pushed only when the break prints its expected `RESULT BUG` and the fix
+prints `RESULT OK` on that kernel, as before.
+
+The images follow their branches. `BUILD_repro` and `BUILD_fixed` are build
+specs, usually `REPO@BRANCH` and `REPO@BRANCH~1` or
+`https://github.com/openzfs/zfs@merge-base(BRANCH)` (see
+[reproducer-format.md](reproducer-format.md#build-specs)). For each job,
+`build-local.sh` first resolves them to commits
+(`builder/build.sh resolve USER/SLUG`). It then reads the
+`io.github.wrouesnel.zfs-repro.build` label of each published tag with
+`skopeo inspect`. If every label already names the resolved `REPO@SHA`, it
+skips the job. Otherwise, because a branch moved or the image is missing,
+it builds the job from exactly those commits, checks it and pushes it,
+replacing the tags. `FORCE=1` rebuilds every job. Running the loop again
+therefore rebuilds just the reproducers whose branches moved.
 
 Two workflows remain, and neither builds anything:
 

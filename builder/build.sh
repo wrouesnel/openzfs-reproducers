@@ -6,12 +6,14 @@
 # A reproducer ID is USER/SLUG (reproducers/USER/SLUG/reproducer.conf): the
 # GitHub owner of the fix branch and the branch name, slugified.  It has two
 # builds, LABEL repro (the break: master or the test-only commit) and fixed
-# (the fix branch head), and is built for TARGETS (bases/TARGET/base.conf:
+# (the fix branch head), named by specs that each build resolves to a commit
+# ("build specs" below), and is built for TARGETS (bases/TARGET/base.conf:
 # the kernels openzfs/zfs CI runs; default: every x86_64 Linux target).
 #
 #   builder/build.sh all ID [TARGET...]       everything for ID, then check
 #   builder/build.sh userland USERLAND        the shared root (work/userlands/U)
 #   builder/build.sh kernel TARGET            a target's kernel (work/targets/T)
+#   builder/build.sh resolve ID [LABEL]       resolve the build specs now (below)
 #   builder/build.sh zfs-user USERLAND REPO@SHA [CONFIGURE...]   OpenZFS tools
 #   builder/build.sh zfs-kmod TARGET REPO@SHA [CONFIGURE...]     OpenZFS modules
 #   builder/build.sh zfs-for ID TARGET...     the OpenZFS halves ID needs
@@ -22,7 +24,7 @@
 #   builder/build.sh push ID TARGET [LABEL...]    push the images (after check)
 #   builder/build.sh tag ID LABEL TARGET      an image's tag
 #   builder/build.sh targets ID | ids | labels ID
-#   builder/build.sh verify ID                the builds' commits are public (GitHub)
+#   builder/build.sh verify ID                the resolved commits are public (GitHub)
 #   builder/build.sh plan                     the CI matrix (JSON; PREV_RESULTS=FILE
 #                                             leaves out jobs with unchanged inputs)
 #   builder/build.sh inputs ID TARGET         the hash of a job's inputs
@@ -34,7 +36,7 @@
 #
 # Environment: ZFS_REPRO_IMAGE (default ghcr.io/wrouesnel/openzfs-reproducers),
 # ZFS_REPRO_WORK (default ./work), PODMAN (default podman), CHECK_ARGS (extra
-# --check arguments, e.g. --runs 20), RESULTS_FILE, VERBOSE.
+# --check arguments, e.g. --runs 20), RESULTS_FILE, VERBOSE, REUSE_RESOLVED.
 set -euo pipefail
 T=$(cd "$(dirname "$0")/.." && pwd)
 IMAGE=${ZFS_REPRO_IMAGE:-ghcr.io/wrouesnel/openzfs-reproducers}
@@ -76,6 +78,106 @@ targets_of() {	# the targets a reproducer is built for
 }
 labels() { local l; for l in repro fixed; do [ -n "$(rconf "$1" "BUILD_$l")" ] && echo "$l"; done; }
 userland_of() { tconf "$1" USERLAND; }
+
+# ---- build specs ----------------------------------------------------------------
+# BUILD_repro and BUILD_fixed are specs (docs/reproducer-format.md, "Build
+# specs"), resolved to one commit each per build:
+#   URL@SHA                 a pin: that commit (40 hex digits), not resolved
+#   URL@REF                 the head of branch (or tag) REF on URL
+#   URL@REF~N               N commits below it (first parent): REF~1 is the
+#                           test commit of a "test, then fix" branch
+#   URL@merge-base(REF)     the merge base of branch REF of the reproducer's
+#                           REPO with URL's master: the openzfs/zfs commit a
+#                           fix branch is based on
+# They are resolved with git ls-remote and a blobless fetch into
+# $WORK/git/zfs (refs/zr/OWNER/REF), and the resolved URL@SHA is what the
+# cache keys, build.conf, the image labels, verify and plan use.  `all` and
+# `resolve` resolve afresh (REUSE_RESOLVED=1: keep what an earlier `resolve`
+# saved) and save the result in $WORK/resolved/USER-SLUG.conf; the other
+# commands use that file while the specs in it still match, so the steps of
+# one build agree on the commits even if a branch moves meanwhile.
+ZG=$WORK/git/zfs
+issha() { [[ $1 =~ ^[0-9a-f]{40}$ ]]; }
+zgit() { git -C "$ZG" "$@"; }
+zrref() {	# URL REF: where the cache keeps REF of URL
+	local u=${1%/}; u=${u%.git}; u=${u#https://github.com/}; u=${u#*://}; u=${u%/zfs}
+	echo "refs/zr/$(printf '%s' "$u" | tr -c 'A-Za-z0-9_.-' '_')/$2"
+}
+fetch_ref() {	# URL REF: the commit REF (a branch, else a tag) of URL now, fetched into the cache
+	local url=$1 ref=$2 ls sha src r
+	[ -d "$ZG" ] || { git init -q --bare "$ZG"; zgit config gc.auto 0; }
+	ls=$(git ls-remote "$url" "refs/heads/$ref" "refs/tags/$ref" "refs/tags/$ref^{}") || { echo "git ls-remote $url failed" >&2; return 1; }
+	sha=$(awk -v r="refs/heads/$ref" '$2 == r { print $1 }' <<<"$ls") src=refs/heads/$ref
+	[ -n "$sha" ] || sha=$(awk -v r="refs/tags/$ref^{}" '$2 == r { print $1 }' <<<"$ls") src=refs/tags/$ref
+	[ -n "$sha" ] || sha=$(awk -v r="refs/tags/$ref" '$2 == r { print $1 }' <<<"$ls")
+	[ -n "$sha" ] || { echo "$url has no branch or tag '$ref'" >&2; return 1; }
+	r=$(zrref "$url" "$ref")
+	if ! zgit cat-file -e "$sha^{commit}" 2>/dev/null; then
+		# blobless: the history (for ~N and merge bases), not the files
+		(flock 9; zgit fetch -q --filter=blob:none "$url" "+$src:$r") 9>"$ZG.lock" ||
+		    { echo "git fetch $url $ref failed" >&2; return 1; }
+	fi
+	zgit update-ref "$r" "$sha"
+	echo "$sha"
+}
+resolve_spec() {	# SPEC REPO: SPEC resolved to URL@SHA
+	local spec=$1 repo=$2 url rev ref n sha a b
+	[[ $spec == *@* ]] || { echo "build spec '$spec': not URL@REV" >&2; return 1; }
+	url=${spec%@*} rev=${spec##*@}
+	if issha "$rev"; then echo "$spec"; return; fi
+	if [[ $rev =~ ^merge-base\(([^\)]+)\)$ ]]; then
+		ref=${BASH_REMATCH[1]}
+		a=$(fetch_ref "$repo" "$ref") && b=$(fetch_ref "$url" master) || return 1
+		sha=$(zgit merge-base "$a" "$b") || { echo "build spec '$spec': no merge base" >&2; return 1; }
+	elif [[ $rev =~ ^([A-Za-z0-9._/+-]+)(~([0-9]*))?$ ]]; then
+		ref=${BASH_REMATCH[1]} n=${BASH_REMATCH[3]}
+		[ -n "${BASH_REMATCH[2]}" ] && [ -z "$n" ] && n=1
+		a=$(fetch_ref "$url" "$ref") || return 1
+		sha=$(zgit rev-parse --verify -q "$a~${n:-0}^{commit}") || { echo "build spec '$spec': $ref has fewer than $n commits below its head" >&2; return 1; }
+	else
+		echo "build spec '$spec': REV must be a full sha, REF, REF~N or merge-base(REF)" >&2; return 1
+	fi
+	echo "$url@$sha"
+}
+declare -A RESOLVED=()
+resfile() { echo "$WORK/resolved/$(idtag "$1").conf"; }
+resolve_id() {	# ID [fresh]: resolve ID's builds into RESOLVED[ID/LABEL] (once per run)
+	local id=$1 f l s r ok=1; f=$(resfile "$id")
+	[ -n "${RESOLVED[$id]:-}" ] && return 0
+	if [ "${2:-}" != fresh ] || [ -n "${REUSE_RESOLVED:-}" ]; then
+		# an earlier step's resolution, while the specs are the same
+		if [ -f "$f" ]; then
+			for l in repro fixed; do [ "$(conf "$f" "SPEC_$l")" = "$(rconf "$id" "BUILD_$l")" ] || ok=; done
+		else ok=; fi
+		if [ -n "$ok" ]; then
+			for l in repro fixed; do RESOLVED[$id/$l]=$(conf "$f" "BUILD_$l"); done
+			RESOLVED[$id]=1; return 0
+		fi
+	fi
+	mkdir -p "$WORK/resolved"
+	{
+		echo "# $id: BUILD_* resolved by builder/build.sh at $(date -u +%FT%TZ)"
+		for l in repro fixed; do
+			s=$(rconf "$id" "BUILD_$l") r=
+			if [ -n "$s" ]; then r=$(resolve_spec "$s" "$(rconf "$id" REPO)") || { echo "$id: cannot resolve BUILD_$l" >&2; return 1; }; fi
+			RESOLVED[$id/$l]=$r
+			echo "SPEC_$l=$(q "$s")"
+			echo "BUILD_$l=$(q "$r")"
+		done
+	} >"$f.tmp" || return 1
+	mv "$f.tmp" "$f"
+	RESOLVED[$id]=1
+}
+build_of() {	# ID LABEL: the resolved REPO@SHA of that build
+	resolve_id "$1" || exit 1
+	echo "${RESOLVED[$1/$2]}"
+}
+cmd_resolve() {	# ID [LABEL]: resolve afresh; print "LABEL URL@SHA SPEC" (or URL@SHA of LABEL)
+	local id=$1 l
+	resolve_id "$id" fresh || exit 1
+	if [ -n "${2:-}" ]; then echo "${RESOLVED[$id/$2]}"; return; fi
+	for l in $(labels "$id"); do echo "$l ${RESOLVED[$id/$l]} $(rconf "$id" "BUILD_$l")"; done
+}
 
 # the image tag of LABEL (repro|fixed) of ID on TARGET:
 #   LABEL-USER-SLUG-TARGET-KERNEL, at most 128 characters.  Longer: the slug
@@ -191,31 +293,34 @@ rextra() {	# TOOLS, with @zts expanded (builder/zts-tools.txt)
 cmd_zfs_for() {	# ID TARGET...: both halves of each build
 	local id=$1 l t u; shift
 	EXTRA=$(rextra "$id")
+	resolve_id "$id" || exit 1
 	for t in "$@"; do
 		u=$(userland_of "$t")
 		for l in $(labels "$id"); do
 			# shellcheck disable=SC2046
-			cmd_zfs user "$u" "$(rconf "$id" "BUILD_$l")" $(rconf "$id" CONFIGURE)
+			cmd_zfs user "$u" "$(build_of "$id" "$l")" $(rconf "$id" CONFIGURE)
 			# shellcheck disable=SC2046
-			cmd_zfs kmod "$t" "$(rconf "$id" "BUILD_$l")" $(rconf "$id" CONFIGURE)
+			cmd_zfs kmod "$t" "$(build_of "$id" "$l")" $(rconf "$id" CONFIGURE)
 		done
 	done
 }
 cmd_demo() {
-	local id=$1 u; u=${2:-$(userland_of "$(targets_of "$id" | head -1)")}
+	local id=$1 u f; u=${2:-$(userland_of "$(targets_of "$id" | head -1)")}; f=$(resfile "$id")
 	[ -f "$WORK/userlands/$u/files" ] || cmd_userland "$u"
-	inb "u-$u" bash /src/builder/in/demo-disk.sh "$id" "/src/reproducers/$id" "/work/userlands/$u" "/work/demos/$id"
+	resolve_id "$id" || exit 1
+	inb "u-$u" bash /src/builder/in/demo-disk.sh "$id" "/src/reproducers/$id" "/work/userlands/$u" "/work/demos/$id" "/work/${f#"$WORK"/}"
 }
 cmd_disks() {	# ID TARGET...: each label's build disk for each target
 	local id=$1 t l u du dk o d; shift
 	EXTRA=$(rextra "$id")
+	resolve_id "$id" || exit 1
 	for t in "$@"; do
 		u=$(userland_of "$t")
 		for l in $(labels "$id"); do
 			# shellcheck disable=SC2046
-			du=$(zdir user "$u" "$(rconf "$id" "BUILD_$l")" $(rconf "$id" CONFIGURE))
+			du=$(zdir user "$u" "$(build_of "$id" "$l")" $(rconf "$id" CONFIGURE))
 			# shellcheck disable=SC2046
-			dk=$(zdir kmod "$t" "$(rconf "$id" "BUILD_$l")" $(rconf "$id" CONFIGURE))
+			dk=$(zdir kmod "$t" "$(build_of "$id" "$l")" $(rconf "$id" CONFIGURE))
 			for d in "$du" "$dk"; do [ -f "$d/pkg/build.txt" ] || { echo "no build ${d#"$WORK"/}: builder/build.sh zfs-for $id $t" >&2; return 1; }; done
 			o=$WORK/builds/$id/$t/$l
 			mkdir -p "$o"
@@ -233,7 +338,8 @@ write_build() {	# ID LABEL TARGET USERDIR KMODDIR: the image's build.conf
 	echo "LABEL=$(q "$l")"
 	echo "TARGET=$(q "$t")"
 	echo "KERNEL=$(q "$(tconf "$t" KERNEL)")"
-	echo "BUILD=$(q "$(rconf "$id" "BUILD_$l")")"
+	echo "BUILD=$(q "$(build_of "$id" "$l")")"
+	echo "SPEC=$(q "$(rconf "$id" "BUILD_$l")")"
 	echo "MARKER=$(q "$(head -1 "$dk/pkg/build.txt")")"
 	echo "ZFS=$(q "$(sed -n 2p "$dk/pkg/build.txt")")"
 	for k in EXPECT EXPECT_INSPECT RUNS MIN_MATCH; do echo "$k=$(q "$(rconf "$id" "${k}_$l")")"; done
@@ -255,6 +361,7 @@ build_sources() {
 lbl() { largs+=(--label "$1"); }
 cmd_images() {	# ID TARGET...
 	local id=$1 t u l o ctx D a; shift
+	resolve_id "$id" || exit 1
 	ctx=$(mktemp -d "$WORK/ctx.XXXXXX")
 	$PODMAN image exists "$(tag_runtime)" ||
 	    $PODMAN build -q -t "$(tag_runtime)" -f "$T/runtime/Containerfile" "$T/runtime" >/dev/null
@@ -314,7 +421,8 @@ cmd_images() {	# ID TARGET...
 			lbl "io.github.wrouesnel.zfs-repro.target=$t"
 			lbl "io.github.wrouesnel.zfs-repro.kernel=$(tconf "$t" KERNEL)"
 			lbl "io.github.wrouesnel.zfs-repro.branch=$(rconf "$id" REPO)/tree/$(rconf "$id" BRANCH)"
-			lbl "io.github.wrouesnel.zfs-repro.build=$(rconf "$id" "BUILD_$l")"
+			lbl "io.github.wrouesnel.zfs-repro.build=$(build_of "$id" "$l")"
+			lbl "io.github.wrouesnel.zfs-repro.build-spec=$(rconf "$id" "BUILD_$l")"
 			lbl "io.github.wrouesnel.zfs-repro.expect=$(rconf "$id" "EXPECT_$l")"
 			[ -n "$(rconf "$id" AUTHOR)" ] && lbl "io.github.wrouesnel.zfs-repro.author=$(rconf "$id" AUTHOR)"
 			[ -n "$(rconf "$id" PRS)" ] && lbl "io.github.wrouesnel.zfs-repro.prs=$(rconf "$id" PRS)"
@@ -380,12 +488,13 @@ cmd_plan() {	# JSON for the CI matrix, with every cache key and work dir
 	{
 		for id in $(all_ids); do
 			EXTRA=$(rextra "$id") cfg=$(rconf "$id" CONFIGURE)
+			resolve_id "$id" || exit 1
 			for t in $(targets_of "$id"); do
 				[ "$(tconf "$t" OS)" = Linux ] || continue
 				u=$(userland_of "$t")
 				printf 'J\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$t" "$u" "$(cmd_key builder "$t")" "$(cmd_key kernel "$t")" "$(cmd_key builder "u-$u")"
 				for l in repro fixed; do
-					rs=$(rconf "$id" "BUILD_$l")
+					rs=$(build_of "$id" "$l")
 					if [ -n "$rs" ]; then
 						# shellcheck disable=SC2086
 						printf '\t%s\t%s\t%s\t%s' "$(cmd_key zfs-user "$u" "$rs" $cfg)" "$(zdir user "$u" "$rs" $cfg | sed "s|^$WORK/||")" \
@@ -452,10 +561,11 @@ print(json.dumps({"jobs": jobs, "targets": list(targets.values()), "userlands": 
 # result (docs/ci.md); builder/build.sh itself (orchestration) is left out.
 cmd_inputs() {
 	local id=$1 t=$2 u l; u=$(userland_of "$t")
+	resolve_id "$id" || exit 1
 	{
 		(cd "$T/reproducers/$id" && find . -type f | LC_ALL=C sort | while read -r f; do echo "$f"; cat "$f"; done)
 		echo "EXTRA=$(rextra "$id")"
-		for l in repro fixed; do echo "$l=$(rconf "$id" "BUILD_$l")"; done
+		for l in repro fixed; do echo "$l=$(build_of "$id" "$l")"; done
 		cmd_key kernel "$t"; [ "$(tconf "$t" OS)" = Linux ] && cmd_key userland "$u"
 		hashof runtime/Containerfile runtime/prune.sh runtime/zfs-repro-vm
 		hashof builder/in/demo-disk.sh builder/in/zts-pack.sh builder/in/zts-run.sh builder/in/zts-udevadm builder/in/zts-sudo builder/in/zvol_name.c builder/in/build-disk.sh \
@@ -480,22 +590,27 @@ cmd_key() {	# cache keys: what each output depends on
 	esac
 }
 
-# verify ID: each build's commit is public: reachable from the fix branch
-# (or openzfs/zfs master) on GitHub, per the GitHub compare API
+# verify ID: each build's resolved commit is public: reachable from the
+# branch its spec names (a pin: BRANCH; on openzfs/zfs: master) on GitHub,
+# per the GitHub compare API
 gh_get() {
 	curl -fsSL ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} -H 'Accept: application/vnd.github+json' "https://api.github.com/$1"
 }
 cmd_verify() {
-	local id=$1 l rs repo sha ref st rc=0
+	local id=$1 l rs spec rev repo sha ref st rc=0
+	resolve_id "$id" fresh || exit 1
 	for l in $(labels "$id"); do
-		rs=$(rconf "$id" "BUILD_$l"); repo=${rs%@*} sha=${rs##*@}
+		rs=$(build_of "$id" "$l") spec=$(rconf "$id" "BUILD_$l"); repo=${rs%@*} sha=${rs##*@} rev=${spec##*@}
+		case $repo in https://github.com/*) ;; *) echo "$id $l: $repo is not on GitHub: not public" >&2; rc=1; continue ;; esac
 		repo=${repo#https://github.com/}; repo=${repo%.git}
-		[ ${#sha} = 40 ] || { echo "$id $l: $sha is not a full sha" >&2; rc=1; continue; }
-		if [ "${repo%%/*}" = openzfs ]; then ref=master; else ref=$(rconf "$id" BRANCH); fi
+		issha "$sha" || { echo "$id $l: $sha is not a full sha" >&2; rc=1; continue; }
+		if [ "${repo%%/*}" = openzfs ]; then ref=master
+		elif issha "$rev" || [[ $rev == merge-base\(* ]]; then ref=$(rconf "$id" BRANCH)
+		else ref=${rev%%~*}; fi
 		st=$(gh_get "repos/$repo/compare/$sha...$ref" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' 2>/dev/null)
 		case $st in
-		ahead | identical) echo "$id $l: $repo@${sha:0:12} is on $ref" ;;
-		*) echo "$id $l: $repo@${sha:0:12} is NOT reachable from $repo $ref (${st:-not found})" >&2; rc=1 ;;
+		ahead | identical) echo "$id $l: $repo@${sha:0:12} ($spec) is on $ref" ;;
+		*) echo "$id $l: $repo@${sha:0:12} ($spec) is NOT reachable from $repo $ref (${st:-not found})" >&2; rc=1 ;;
 		esac
 	done
 	return $rc
@@ -506,7 +621,7 @@ EXTRA=${EXTRA:-}
 case $c in
 builder) cmd_builder "$@" ;;
 builder-load) cmd_builder_load "$@" ;;
-userland | kernel | demo | disks | images | push | plan | key | sizes | verify | inputs) "cmd_$c" "$@" ;;
+userland | kernel | demo | disks | images | push | plan | key | sizes | verify | inputs | resolve) "cmd_$c" "$@" ;;
 zfs-user) cmd_zfs user "$@" ;;
 zfs-kmod) cmd_zfs kmod "$@" ;;
 zfs-for) cmd_zfs_for "$@" ;;
@@ -519,6 +634,8 @@ labels) labels "$@" ;;
 all)
 	id=$1; shift
 	ts=("$@"); [ ${#ts[@]} -gt 0 ] || read -ra ts <<<"$(targets_of "$id" | tr '\n' ' ')"
+	resolve_id "$id" fresh || exit 1
+	echo "builds of $id:"; for l in $(labels "$id"); do echo "  $l: ${RESOLVED[$id/$l]}  ($(rconf "$id" "BUILD_$l"))"; done
 	for t in "${ts[@]}"; do cmd_userland "$(userland_of "$t")"; cmd_kernel "$t"; done
 	cmd_zfs_for "$id" "${ts[@]}"
 	cmd_demo "$id"

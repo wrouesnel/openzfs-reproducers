@@ -93,7 +93,8 @@ for path in sorted(l.strip() for l in open(f"{tmp}/confs.txt") if l.strip()):
         branch = f"[{br}]({repo}/tree/{br})"
         if head is None:
             branch += " (not on the fork)"
-        elif fixed and head != fixed:
+        elif re.fullmatch(r"[0-9a-f]{40}", fixed) and head != fixed:
+            # a pinned fix (the usual spec is the branch, which tracks the head)
             branch += f" (head {head[:10]}, image pins {fixed[:10]})"
     else:
         branch = f"[{user}:{br}]({repo}/tree/{br})"

@@ -45,8 +45,8 @@ read them.
 | `REPO`, `BRANCH` | the fix branch: `https://github.com/USER/zfs` and the branch name (its slug is the directory name) |
 | `AUTHOR`, `REPORTER` | who wrote the fix (`@handle`) and who reported the bug (`@handle` or an issue); shown by `--info` and in the labels |
 | `PRS`, `ISSUES` | optional openzfs/zfs PR and issue numbers (space separated): metadata, and hints for the alias tags (`scripts/aliases.py` also finds them itself) |
-| `BUILD_repro` | the break: `REPO@SHA` (full 40-hex sha). Usually the branch's test commit (the test without the fix) or the openzfs/zfs master commit the branch is based on |
-| `BUILD_fixed` | the fix: `REPO@SHA`, the branch head. Leave it out for a self-test with nothing to fix |
+| `BUILD_repro` | the break, a build spec (below): usually the branch's test commit (the test without the fix), `REPO@BRANCH~1`, or the openzfs/zfs master commit the branch is based on, `https://github.com/openzfs/zfs@merge-base(BRANCH)` |
+| `BUILD_fixed` | the fix, a build spec: the branch head, `REPO@BRANCH`. Leave it out for a self-test with nothing to fix |
 | `CONFIGURE` | OpenZFS configure arguments for both builds (usually `--enable-debug`) |
 | `TOOLS` | more programs for the build disk: OpenZFS tools (`zgenhostid`, `zed`, ...) or ZTS helpers (`file_write`, ...) |
 | `EXPECT_repro`, `EXPECT_fixed` | the start of the `RESULT` line each build must print (`PANIC` matches a kernel panic). `--check` and CI compare it |
@@ -70,9 +70,43 @@ read them.
 | `BLOCKED` | why this reproducer doesn't show its bug yet (docs/coverage.md): `builder/build.sh ids` and CI leave it out (`WITH_BLOCKED=1` includes it) |
 | `EXTRA_PKGS` | packages of the userland builder's distribution (at its snapshot) to unpack on the demo disk: their programs on `/demo/bin`, their libraries on `/demo/lib` |
 
-Every commit must be public: CI runs `builder/build.sh verify ID`, which asks
-GitHub whether each `BUILD_*` commit is reachable from `BRANCH` on its
-repository (or from master on openzfs/zfs).
+### Build specs
+
+`BUILD_repro` and `BUILD_fixed` name the commit each image is built from.
+They follow the branch: every build resolves them again, so when a branch is
+reworked or rebased the next build tests its new head.
+
+| spec | the commit |
+|---|---|
+| `URL@BRANCH` | the head of branch `BRANCH` on the repository `URL` (a tag works too) |
+| `URL@BRANCH~N` | `N` commits below that head, following first parents: the test commit of a "test, then fix" branch is `BRANCH~1`, or `BRANCH~N` when the fix is `N` commits |
+| `URL@merge-base(BRANCH)` | the merge base of branch `BRANCH` of the reproducer's `REPO` with master on `URL`: with `URL` = `https://github.com/openzfs/zfs`, the upstream commit the fix branch is based on (the break of a test-only fix, or of a fix whose test came with it) |
+| `URL@SHA` | a pin: exactly that commit (40 hex digits), never resolved. Only for a build that must not move, such as someone's candidate that isn't on a branch |
+
+```sh
+REPO='https://github.com/wrouesnel/zfs'
+BRANCH='fix-some-branch'
+BUILD_repro='https://github.com/wrouesnel/zfs@fix-some-branch~1'     # the test commit
+BUILD_fixed='https://github.com/wrouesnel/zfs@fix-some-branch'       # the head
+# a test-only fix: master with the original test
+BUILD_repro='https://github.com/openzfs/zfs@merge-base(fix-zts-branch)'
+```
+
+`builder/build.sh` resolves each spec to a sha once per build, before it
+builds anything: `git ls-remote` for the branch head, then a blobless fetch
+into `work/git/zfs` and `git rev-parse` / `git merge-base`.
+`builder/build.sh resolve USER/SLUG` shows what the specs resolve to now.
+The resolved `URL@SHA` is what is built and recorded: the build's cache
+directory under `work/zfs/`, the image's `build.conf` (`BUILD=`, with the
+spec as `SPEC=`), and its labels (`io.github.wrouesnel.zfs-repro.build` is
+`URL@SHA`, `io.github.wrouesnel.zfs-repro.build-spec` the spec). So the
+labels always say which commit an image holds, and a branch that moved since
+shows up as a label that differs from what the spec resolves to now
+(`scripts/build-local.sh` rebuilds exactly those).
+
+Every commit must be public: `builder/build.sh verify ID` asks GitHub whether
+each resolved commit is reachable from the branch its spec names (for a pin
+or `merge-base(...)`, `BRANCH`; on openzfs/zfs, master).
 
 ### Repeated runs (flaky bugs)
 
@@ -276,7 +310,7 @@ builder/build.sh all wrouesnel/fix-some-branch ubuntu24             # RESULT BUG
 
 It finds the break (the commit before the fix, or master for a test-only
 fix; for a branch stacked on another fix of ours, set `BUILD_repro` to this
-fix's own test commit and `ZTS_TESTS` to its test), the fix (the branch head), the tests the branch adds or changes, the
+fix's own test commit, `REPO@BRANCH~N`, and `ZTS_TESTS` to its test), the fix (the branch head), the tests the branch adds or changes, the
 ZTS helpers they use and the openzfs/zfs PR the branch heads. Check the
 result once on ubuntu24, set `ZTS_ITERATIONS` for a flake, and list the
 branch in [coverage.md](coverage.md). A bug that a ZTS test can't show (a
@@ -285,7 +319,7 @@ console demo, host-side triggers) gets a `demo.sh` instead:
 1. Push the fix branch (the test commit, then the fix) to a public GitHub
    repository, for example github.com/wrouesnel/zfs.
 2. Create `reproducers/USER/SLUG/` with `reproducer.conf` (`REPO`, `BRANCH`,
-   `BUILD_repro`, `BUILD_fixed` by full sha, the expected RESULT lines and the
+   `BUILD_repro`, `BUILD_fixed` as build specs (`REPO@BRANCH~1`, `REPO@BRANCH`), the expected RESULT lines and the
    VM settings) and `demo.sh`. Someone else's branch works the same way: USER
    is their GitHub name, `AUTHOR` credits them, and the demo can be ours.
 3. `builder/build.sh verify USER/SLUG` checks the commits are public;
@@ -295,7 +329,9 @@ console demo, host-side triggers) gets a `demo.sh` instead:
    results land in its `results-matrix` artifact (copied to docs/results.md).
 5. When the branch gets an upstream PR, nothing needs to change: the alias job
    finds it and tags the images `repro-prN-...` / `fixed-prN-...` once the PR's
-   head is the commit that was built. If the head moves, update `BUILD_fixed`.
+   head is the commit that was built. If the head moves, nothing needs to
+   change either: the next build resolves `BUILD_fixed` to the new head, and
+   the aliases follow once its images pass.
 
 **Pool-state bugs get a console demo that shows the pool.** When the bug is
 about pool, vdev, scan, DTL or error state (resilver, scrub, replace, attach
