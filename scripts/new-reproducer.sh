@@ -19,6 +19,9 @@
 #   TOOLS        the ZTS helper programs (builder/zts-tools.txt) the tests,
 #                their group's files and libtest.shlib name
 #   PRS          the openzfs/zfs PR whose head is this branch (gh), if any
+#   BASE         'ext' when the tests need what only the extended base has
+#                (scsi_debug or other kernel modules, valgrind, real udev:
+#                docs/reproducer-format.md, "The extended base")
 # When the branch's first commit changes code (no test-only commit first),
 # the break is master and both builds run the fix head's test scripts
 # (ZTS_SCRIPTS=fixed).  A test-only branch is a flake fix: the scaffold says
@@ -94,7 +97,11 @@ for t in "${TESTS[@]}"; do
 	d=tests/zfs-tests/${t%/*}
 	git -C "$G" ls-tree --name-only "$head" "$d/" | grep -E '\.(ksh|kshlib|shlib|cfg)$' |
 	    while read -r f; do git -C "$G" show "$head:$f"; done
-done | grep -qwE 'zed_setup|zed_start' && tools="${tools:+$tools }zed"
+done | grep -wE 'zed_setup|zed_start' >/dev/null && tools="${tools:+$tools }zed"
+# tools only the extended base has (BASE=ext): kernel modules (scsi_debug,
+# modprobe), valgrind, gdb, real udev (udevadm info/monitor)
+ext=$(for t in "${TESTS[@]}"; do git -C "$G" show "$head:tests/zfs-tests/$t.ksh"; done |
+    grep -wE 'load_scsi_debug|scsi_debug|modprobe|valgrind|gdb|udevadm info|udevadm monitor' >/dev/null && echo ext || true)
 pr=$(gh pr list -R openzfs/zfs --head "$BR" --author "$GHUSER" --state all --json number,headRefOid \
     --jq ".[] | select(.headRefOid == \"$head\") | .number" 2>/dev/null | head -1 || true)
 if [ $kind = fix ]; then
@@ -145,5 +152,6 @@ mkdir -p "$D"
 	echo "TIMEOUT=1800"
 	echo "DISKS=1"
 	echo "DISK_SIZE=16G"
+	[ -n "$ext" ] && echo "# the tests need kernel modules, valgrind or udev: the extended base" && echo "BASE='ext'"
 } >"$D/reproducer.conf"
-echo "$ID: $kind; repro ${repro:0:10}$([ "$repro" = "$mb" ] && echo ' (master)'), fixed ${head:0:10}; tests: ${TESTS[*]}; tools: ${tools:-none}${pr:+; PR #$pr}"
+echo "$ID: $kind; repro ${repro:0:10}$([ "$repro" = "$mb" ] && echo ' (master)'), fixed ${head:0:10}; tests: ${TESTS[*]}; tools: ${tools:-none}${pr:+; PR #$pr}${ext:+; BASE=ext}"
