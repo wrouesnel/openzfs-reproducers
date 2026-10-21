@@ -50,7 +50,20 @@ clusters are already zlib-compressed).
 | userland-ubuntu24-ext | 146 MB, 2105 files (the standard root is 10 MB of it) | 65 MB | every `BASE='ext'` image on every Linux target |
 | kernel-ubuntu24-...-ext | 129 MB of modules (6472, zstd-compressed as Ubuntu ships them: `linux-modules` + `linux-modules-extra`) + vmlinuz 15 MB | 133 MB overlay + 15 MB vmlinuz | every `BASE='ext'` image on ubuntu24 |
 | demo, build | as on the standard base (the demo disk is smaller: it doesn't carry what the ext userland has) | | |
-| **one ext image (ubuntu24)** | | **~290 MB** (runtime 18 + 65 + 148 + build 6) | |
+| **one ext image (ubuntu24)** | **300 MB** | **~250 MB** (alpine and runtime 22 + 65 + 154 + demo and build 9) | |
+| **another ext reproducer on ubuntu24** | +9 MB | +9 MB | |
+
+The other targets' module layers (the overlay; plus each target's vmlinuz
+and initrd, as on the standard base):
+
+| target | modules | unpacked | overlay |
+|---|---|---|---|
+| ubuntu22 | 6023 (uncompressed, as Ubuntu 22.04 ships them) | 430 MB | 131 MB |
+| ubuntu26 | 6901 | | 149 MB |
+| debian13 | 4230 (xz) | 90 MB | 93 MB |
+| fedora44 | 4850 (xz) | 124 MB | 127 MB |
+| almalinux10 | 2417 (xz) | 70 MB | 73 MB |
+| alpine3-24 | 3724 (gzip, unpacked: the userland's kmod has no zlib) | 503 MB | 132 MB |
 
 The extended userland's root file system has 3 GiB and 64k inodes of free
 room (unused, so free in the qcow2) for a target's module tree; the kernel
