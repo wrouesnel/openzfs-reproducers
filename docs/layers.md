@@ -39,6 +39,30 @@ zstd-19 layer 4.4 MB, but unpacked 3-5 times larger on the user's disk; so
 the disks stay qcow2. The kernels are the distributions' compressed vmlinuz
 files, which don't compress further.
 
+## The extended base (BASE='ext')
+
+Measured 2026-10-21 (unpacked: the file tree in the guest; layer: the
+compressed qcow2 the layer holds, about what a pull downloads, since qcow2
+clusters are already zlib-compressed).
+
+| layer | unpacked | layer | shared by |
+|---|---|---|---|
+| userland-ubuntu24-ext | 146 MB, 2105 files (the standard root is 10 MB of it) | 65 MB | every `BASE='ext'` image on every Linux target |
+| kernel-ubuntu24-...-ext | 129 MB of modules (6472, zstd-compressed as Ubuntu ships them: `linux-modules` + `linux-modules-extra`) + vmlinuz 15 MB | 133 MB overlay + 15 MB vmlinuz | every `BASE='ext'` image on ubuntu24 |
+| demo, build | as on the standard base (the demo disk is smaller: it doesn't carry what the ext userland has) | | |
+| **one ext image (ubuntu24)** | | **~290 MB** (runtime 18 + 65 + 148 + build 6) | |
+
+The extended userland's root file system has 3 GiB and 64k inodes of free
+room (unused, so free in the qcow2) for a target's module tree; the kernel
+layer's `base.qcow2` is a qcow2 overlay whose backing file is the ext
+userland's disk (`userland-ubuntu24-ext.qcow2`, next to it in
+`/zfs-repro/base`), holding only the clusters the module tree changed
+(`builder/in/kernel-ext.sh`). So the tools cost one download for all ext
+reproducers and targets, and each target's modules one download for all ext
+reproducers on that target. The standard layers and their tags are
+untouched. Booting takes about 5 s to the prompt instead of 2 (udev's
+coldplug and settle).
+
 ## Further options (not done)
 
 - A qemu built for this (`--target-list=x86_64-softmmu`, KVM + TCG, no

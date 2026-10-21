@@ -69,6 +69,7 @@ read them.
 | `ZTS_ITERATIONS` | `KIND=zts`: how many times one demo runs the tests (a flake: `RESULT BUG` if any run fails) |
 | `BLOCKED` | why this reproducer doesn't show its bug yet (docs/coverage.md): `builder/build.sh ids` and CI leave it out (`WITH_BLOCKED=1` includes it) |
 | `EXTRA_PKGS` | packages of the userland builder's distribution (at its snapshot) to unpack on the demo disk: their programs on `/demo/bin`, their libraries on `/demo/lib` |
+| `BASE` | `ext`: boot the extended base (the extended userland and the target's full kernel module tree, see "The extended base") instead of the minimal one. Only for a reproducer that a missing tool blocks |
 
 ### Build specs
 
@@ -123,7 +124,7 @@ with triggers (`host.sh`) work the same way: every run boots its own VMs.
 ### The VM
 
 - **Linux targets:** the kernel boots directly; busybox init runs a root bash on
-  serial0. There is no udev. Run disks get a GPT with one partition, and
+  serial0. There is no udev (the extended base, `BASE='ext'`, has it). Run disks get a GPT with one partition, and
   `DEMO_DISK` / `DEMO_DISKS` name the partitions (`/dev/vdd1 ...`; `vda` is
   the root, `vdb` the demo disk and `vdc` the build disk). Use the variables,
   not the names. The serial of run disk N is
@@ -133,6 +134,70 @@ with triggers (`host.sh`) work the same way: every run boots its own VMs.
   `bash -x` trace of an Up, Enter run. ttyS2 is the host channel.
 - A demo **exports** its pool at the end and doesn't destroy it, so
   `--disk` can inspect the run disk later.
+
+### The extended base
+
+The standard base is as small as it can be: one root disk that every Linux
+target shares (busybox, bash, a few GNU tools; about 10 MB), and a kernel
+with only the boot path's modules. Some tests need more. `BASE='ext'` in
+`reproducer.conf` boots the reproducer's images on the **extended base**
+instead:
+
+- **The extended userland** (`userlands/ubuntu24-ext`, built by
+  `builder/in/userland-ext.sh`): the standard root, file for file, plus
+  from the same Ubuntu 24.04 snapshot:
+  - `valgrind` (amd64 tools only), with `libc6-dbg` and an unstripped
+    `ld.so` and libc, which its mandatory redirections need;
+  - real **udev**: `/etc/rcS` starts `systemd-udevd` before the build is
+    loaded and replays the kernel's events, so `/dev/disk/*` and
+    `/dev/zvol/*` links, udev's `watch` rule (it opens a block device after
+    a writer closes it) and `udevadm trigger/settle/info/monitor` work as on
+    a distribution, and libzfs labels whole disks itself (`zpool create
+    POOL sdX`). Run disks still get the GPT with one partition, so
+    `DEMO_DISK` is the same on both bases;
+  - `kmod` (`modprobe`, `insmod`, `lsmod`, `depmod`, `modinfo`):
+    `/etc/modprobe.d/zfs-repro.conf` makes `modprobe zfs` and `modprobe -r
+    zfs` load and unload the image's build (`/zfs/modules`), never a
+    distribution's zfs.ko;
+  - `gdb`, `strace`, `ltrace`, `python3` with its standard library, `fio`
+    (built from its release source, `builder/in/fio.sh`), `sg3-utils`,
+    `lsscsi`, `parted`, `gdisk`, `fdisk`, `util-linux`, `e2fsprogs`,
+    `dmsetup`, GNU `tar`, `attr`, `acl`, `xxd`, `procps`, `psmisc`, `lsof`,
+    `jq`, `xxhash`, `file`, `bc`.
+
+  No compilers. The list is `EXT_PKGS` in `userlands/ubuntu24-ext/userland.conf`.
+- **The target's extended kernel layer** (`builder/in/kernel-ext-modules.sh`,
+  `builder/in/kernel-ext.sh`): the same kernel, plus its full module tree
+  (Ubuntu: `linux-modules` and `linux-modules-extra`; Debian:
+  `linux-image`; AlmaLinux and Fedora: `kernel-modules-core`,
+  `kernel-modules`, `kernel-modules-extra`; Alpine: `linux-stable`), with
+  `modules.dep`, in `/usr/lib/modules/KERNEL`, without the distribution's own
+  zfs and spl. `modprobe scsi_debug`, `dm-flakey`, `brd` and the rest work.
+  The tree is a qcow2 overlay of the extended userland's disk, so the layer
+  holds only the modules and every target shares the userland layer.
+
+The extended layers are image layers of their own (tags
+`userland-ubuntu24-ext-HASH` and `kernel-TARGET-KERNEL-ext-HASH`, HASH their
+cache keys). Every `BASE='ext'` image on a target shares them, so the tools
+cost one download however many reproducers use them (sizes:
+[layers.md](layers.md)). The reproducers' own tags are the same as on the
+standard base (`repro-/fixed-USER-SLUG-TARGET-KERNEL`); their label
+`io.github.wrouesnel.zfs-repro.base` is `ext-HASH`. Switching a reproducer to
+`BASE='ext'` (or changing the extended layers) makes `scripts/build-local.sh`
+build its images again.
+
+**Use it only when tool availability blocks a reproducer**: a test that
+needs `scsi_debug` (or another kernel module), valgrind or real udev. The
+standard base boots faster, is a smaller download, and is what most
+reproducers share. Things the demo disk can carry (a program or two,
+`EXTRA_PKGS`) don't need it. On the extended base the ZTS runner leaves out
+what the extended userland already has (its programs, packages, Python and
+fio) from the demo disk, and doesn't fake udev (`zts-udevadm`).
+A ZTS reproducer on the extended base can carry its own udev rules in
+`reproducers/ID/udev/*.rules`: the runner adds them to `/run/udev/rules.d`
+before the tests (`wrouesnel/fix-zts-errata3-busy` uses one to make udev's
+probe as slow as on CI's VMs). `scripts/new-reproducer.sh` sets `BASE='ext'` when the tests use
+`load_scsi_debug`, `modprobe`, valgrind, gdb or `udevadm info/monitor`.
 
 ## ZTS reproducers
 
@@ -355,4 +420,5 @@ fetches the kernel package, keeps the vmlinuz and the few modules the VM needs
 built against. `builder/in/kernel.sh` packs the kernel and, if virtio or ext4
 aren't built in, an initramfs. `userlands/NAME/userland.conf` is the root file
 system every Linux target of that architecture boots
-(`builder/in/userland.sh`). See docs/targets.md.
+(`builder/in/userland.sh`); `userlands/NAME-ext` (with `PARENT=NAME`) is its
+extended userland, for `BASE='ext'` (above). See docs/targets.md.

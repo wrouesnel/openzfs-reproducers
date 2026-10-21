@@ -65,6 +65,17 @@ Not in the matrix: upstream's optional platforms (`centos-stream9/10`,
   one of them goes, CI's builder for that target fails until the target is
   moved on (the cached builder keeps working meanwhile).
 
+- The extended kernel layer (`BASE='ext'`, docs/reproducer-format.md) is
+  built from the same pins: `builder/in/kernel-ext-modules.sh` fetches, in
+  the target's builder, the packages that hold the rest of the module tree
+  (Ubuntu `linux-modules-K` and `linux-modules-extra-K`; Debian
+  `linux-image-K`; AlmaLinux and Fedora `kernel-modules-core`,
+  `kernel-modules`, `kernel-modules-extra`, next to `KERNEL_RPMS`'
+  kernel-core; Alpine `linux-stable=APKVER`), and
+  `builder/in/kernel-ext.sh` writes it, with its `modules.dep`, into an
+  overlay of the extended userland. Its cache key covers the standard
+  kernel's and the extended userland's, so moving a target rebuilds it too.
+
 ## Moving a target to a newer kernel
 
 1. Read the kernel from a recent upstream run: `gh run view -R openzfs/zfs
