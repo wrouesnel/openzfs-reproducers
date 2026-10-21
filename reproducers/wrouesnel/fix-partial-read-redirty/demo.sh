@@ -32,8 +32,9 @@
 # Each file is read back and compared with what was written.
 #
 # Builds (vm/mkdemo.sh 22 b-lts-6.18 ..., base linux-lts-6.18.56):
-#   bug  master c27dff0c3: all 5 uncached cases BUG
-#        -> "RESULT BUG: uncached data stays in the dbuf cache in 5 of 5 cases: ..."
+#   bug  master c27dff0c3: all 5 uncached cases BUG (4 before Linux 6.14,
+#        which has no RWF_DONTCACHE: dontcache-4k is skipped)
+#        -> "RESULT BUG: uncached data stays in the dbuf cache in every case (5 of 5): ..."
 #   pr   PR #19299 head f5c2bea14: fixes none-4k, odirect-4k, dontcache-4k;
 #        rewrite and fsync remain
 #        -> "RESULT BUG: uncached data stays in the dbuf cache in 2 of 5 cases: rewrite fsync"
@@ -142,7 +143,9 @@ zpool export $P && echo "pool $P exported (on $V)"
 if [ ${#err[@]} -gt 0 ]; then
 	echo "RESULT ERROR: ${err[*]} (see above)"; exit 2
 elif [ ${#bad[@]} -gt 0 ]; then
-	echo "RESULT BUG: uncached data stays in the dbuf cache in ${#bad[@]} of $ncase cases: ${bad[*]}"
+	# "every case": stable across kernels (dontcache-4k runs on 6.14+ only)
+	all="${#bad[@]} of $ncase cases"; [ ${#bad[@]} = $ncase ] && all="every case ($ncase of $ncase)"
+	echo "RESULT BUG: uncached data stays in the dbuf cache in $all: ${bad[*]}"
 else
 	echo "RESULT OK: no uncached data left in the dbuf cache in $ncase of $ncase cases"
 fi
