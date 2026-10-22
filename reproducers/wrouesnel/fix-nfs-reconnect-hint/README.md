@@ -6,10 +6,6 @@ A timing and correctness demo for the directory entry cookie
 [#18134](https://github.com/openzfs/zfs/issues/18134)): reconnecting NFS
 directories costs the same in any directory size.
 
-**Private until the user's review**: the branch is only on the private
-Forgejo backup, so `REPO` and `BUILD_fixed` point there; both become
-`https://github.com/wrouesnel/zfs` when the branch is published.
-
 ## What it shows
 
 When nfsd gets a file handle for a directory whose dentry the server has
