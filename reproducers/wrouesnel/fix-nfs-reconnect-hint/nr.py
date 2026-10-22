@@ -16,9 +16,13 @@
 #   nr.py exchange A B
 #       renameat2(A, B, RENAME_EXCHANGE)
 #   nr.py handles MOUNTDIR PATH...
-#       for each directory PATH (on the file system mounted at MOUNTDIR): name_to_handle_at(); then drop the server's
-#       dentry and inode caches; then open_by_handle_at() each handle and
-#       print "PATH<TAB>the path the kernel reconnected (/proc/self/fd)"
+#       for each directory PATH (on the file system mounted at MOUNTDIR):
+#       name_to_handle_at(); then, one at a time, drop the server's dentry
+#       and inode caches and open_by_handle_at() the handle; print
+#       "PATH<TAB>the path the kernel reconnected (/proc/self/fd)<TAB>how
+#       ZFS found the names": the dirent_name kstat counts during the open
+#       (cookie hits, stale cookies, missing cookies, searches), or "-" on
+#       a build without that kstat
 #   nr.py nfscheck CLIENTPATH...
 #       NFS client side: open each directory, drop the server's caches, then
 #       read the file "id" through each directory fd (nfsd reconnects the
@@ -122,6 +126,16 @@ class FH(ctypes.Structure):
     _fields_ = [("handle_bytes", ctypes.c_uint), ("handle_type", ctypes.c_int),
                 ("f_handle", ctypes.c_ubyte * 128)]
 
+KSTAT = "/proc/spl/kstat/zfs/dirent_name"
+
+def kstats():
+    try:
+        with open(KSTAT) as f:
+            k = {l.split()[0]: int(l.split()[2]) for l in f.read().splitlines()[2:]}
+    except OSError:
+        return None
+    return [k[n] for n in ("cookie_hits", "cookie_stale", "cookie_missing", "searches")]
+
 def handles(mnt, paths):
     AT_FDCWD = -100
     hs = []
@@ -133,14 +147,18 @@ def handles(mnt, paths):
         hs.append(fh)
     # the mount fd: the file system's root (any fd on it would do)
     mfd = os.open(mnt, os.O_RDONLY)
-    drop_caches()
     for p, fh in zip(paths, hs):
+        drop_caches()
+        k0 = kstats()
         fd = libc.open_by_handle_at(mfd, ctypes.byref(fh), os.O_RDONLY | os.O_DIRECTORY)
         if fd < 0:
-            print("%s\t%s" % (p, os.strerror(ctypes.get_errno())))
-            continue
-        print("%s\t%s" % (p, os.readlink("/proc/self/fd/%d" % fd)))
-        os.close(fd)
+            got = os.strerror(ctypes.get_errno())
+        else:
+            got = os.readlink("/proc/self/fd/%d" % fd)
+            os.close(fd)
+        k1 = kstats()
+        how = "-" if k0 is None else " ".join(str(b - a) for a, b in zip(k0, k1))
+        print("%s\t%s\t%s" % (p, got, how))
 
 def nfscheck(paths):
     fds = [os.open(p, os.O_RDONLY) for p in paths]

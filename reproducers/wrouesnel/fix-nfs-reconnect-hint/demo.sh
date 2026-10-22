@@ -24,14 +24,20 @@
 #      time seen by the client.  RATIO = per reconnect in the largest
 #      directory / in the smallest, for 1 client and for 4 clients
 #   4. correctness: renames (within and between directories, in the big
-#      directories too), a RENAME_EXCHANGE, a hard link, and a hint made
-#      stale by an unlink whose name is then reused by another file.  For
-#      each object: zdb's path (zfs_obj_to_path) and `cookie` line; for each
+#      directories too), a RENAME_EXCHANGE, a hard link, a hint made stale
+#      by an unlink whose name is then reused by another file, and a
+#      directory renamed with zfs_parent_cookie=0 (as an implementation
+#      that doesn't know the hint renames: its hint goes stale).  For each
+#      object: zdb's path (zfs_obj_to_path) and `cookie` line (fixed build:
+#      the cookie and "valid" or "stale", checked by zdb); for each
 #      directory: the path the kernel reconnects from its file handle (on
-#      the server) and the NFS client's view after a server cache drop
+#      the server) with the dirent_name kstat counts of that reconnect
+#      (fixed build: names found by cookie, or searched for a stale
+#      cookie), and the NFS client's view after a server cache drop
 #   5. RESULT, from the ratios (not absolute times) and the paths:
 #        bug: both ratios >= 10 (reconnects grow with the directory)
-#        fix: both ratios < 3 (flat) and every path right
+#        fix: both ratios < 3 (flat) and every path right, every cookie
+#             valid except the two stale ones, and only those searched
 #      in between: the scaling step once more, then RESULT ERROR
 #      any wrong path: RESULT ERROR (on either build)
 #
@@ -42,7 +48,11 @@ SIZES="10000 100000 1000000" HELD=400
 BUG_RATIO=10 OK_RATIO=3
 NR=/demo/nr.py
 
+KSTAT=/proc/spl/kstat/zfs/dirent_name
 run() { echo "# $*"; "$@"; }
+# names found by cookie and directory searches so far (zfs_dirent_name()),
+# or nothing on a build without the dirent_name kstat (master)
+kst() { [ -r $KSTAT ] && awk '$1 == "cookie_hits" { h = $3 } $1 == "searches" { s = $3 } END { print h, s }' $KSTAT; }
 step() { echo; echo "=============================================================="; echo "== $*"; echo "=============================================================="; }
 note() { echo "   $*"; }
 look() { echo "   >> $*"; }
@@ -81,9 +91,13 @@ NC
 	run mount.nfs 127.0.0.1:$EXP $MNT -o vers=3,nolock,lookupcache=none,actimeo=0 || return 1
 }
 
-storm() {	# N CLIENTS: one storm in directory N; sets S_OPS S_MED ...
-	local out
+storm() {	# N CLIENTS: one storm in directory N; sets S_OPS S_MED ... S_KST
+	local out k0 k1
+	k0=$(kst)
 	out=$(python3 $NR storm $MNT/"$(dname "$1")" "$1" $HELD "$2") || die "the storm in $(dname "$1") with $2 client(s) failed"
+	k1=$(kst)
+	S_KST=-
+	[ -n "$k0" ] && S_KST=$(echo $k0 $k1 | awk '{ printf "%d/%d", $3 - $1, $4 - $2 }')
 	eval "$(echo "$out" | sed 's/\([A-Z0-9]*\)=/S_\1=/g')"
 	[ "$S_OPS" = "$HELD" ] || die "the storm made $S_OPS lookups, not $HELD"
 }
@@ -99,8 +113,11 @@ scaling() {	# STEP: storms in every directory; sets R1 R4 (largest N / smallest 
 	look "10,000-entry directory.  master searches the parent's entries, so it grows"
 	look "with the directory (about 100x from 10k to 1M); with the cookie it stays"
 	look "about 1x (one entry lookup; the NFS round trip dominates)."
-	printf '\n %9s %7s %10s %13s %10s %9s %7s %10s\n' entries clients reconnects "per reconnect" p90 "nfsd CPU" wall "x smallest"
-	printf ' %9s %7s %10s %13s %10s %9s %7s %10s\n' --------- ------- ---------- ------------- ---------- --------- ------- ----------
+	look "'cookie/search' (fixed build): names ZFS found by cookie / by searching"
+	look "the directory during the storm (dirent_name kstat); master has no such"
+	look "kstat ('-') and searches every time."
+	printf '\n %9s %7s %10s %13s %10s %9s %7s %10s %13s\n' entries clients reconnects "per reconnect" p90 "nfsd CPU" wall "x smallest" cookie/search
+	printf ' %9s %7s %10s %13s %10s %9s %7s %10s %13s\n' --------- ------- ---------- ------------- ---------- --------- ------- ---------- -------------
 	for n in $SIZES; do
 		for c in 1 4; do
 			storm "$n" "$c"
@@ -113,7 +130,7 @@ scaling() {	# STEP: storms in every directory; sets R1 R4 (largest N / smallest 
 				r=$(awk -v a="$S_MED" -v b="$base4" 'BEGIN { printf "%.2f", a / b }')
 				R4=$r
 			fi
-			printf ' %9s %7s %10s %10s ms %7s ms %7s s %5s s %9sx\n' "$n" "$c" "$S_OPS" "$S_MED" "$S_P90" "$S_CPU" "$S_WALL" "$r"
+			printf ' %9s %7s %10s %10s ms %7s ms %7s s %5s s %9sx %13s\n' "$n" "$c" "$S_OPS" "$S_MED" "$S_P90" "$S_CPU" "$S_WALL" "$r" "$S_KST"
 		done
 	done
 	echo
@@ -149,10 +166,10 @@ if [ "$V" = mid ]; then
 	V=$(verdict)
 fi
 
-step "4. correctness: renames, RENAME_EXCHANGE, a hard link, a stale hint"
+step "4. correctness: renames, RENAME_EXCHANGE, a hard link, stale hints"
 C=$EXP/c
 mkdir -p $C/a $C/b
-for d in a/d1 a/d2 a/d3 a/e1 b/e2; do mkdir $C/$d; echo "$d" >$C/$d/id; done
+for d in a/d1 a/d2 a/d3 a/d4 a/e1 b/e2; do mkdir $C/$d; echo "$d" >$C/$d/id; done
 touch $C/a/f1 $C/a/f2
 mv $EXP/n100k/d0000000 $C/a/from-100k-tmp
 echo n100k/d0000000 >$C/a/from-100k-tmp/id
@@ -167,6 +184,12 @@ run rm $C/a/f2-tmp
 run touch $C/a/f2-tmp
 run mv $C/a/from-100k-tmp $C/b/from-100k
 run mv $EXP/n1m/d0000000 $EXP/n1m/d-renamed
+# zfs_parent_cookie=0: renames leave the hint as an implementation that
+# doesn't know it does (fixed build only; master has no such parameter)
+PC=/sys/module/zfs/parameters/zfs_parent_cookie
+[ -w $PC ] && run sh -c "echo 0 > $PC"
+run mv $C/a/d4 $C/b/d4-stale
+[ -w $PC ] && run sh -c "echo 1 > $PC"
 run zpool sync $P
 note
 note "a/d3          created, never renamed"
@@ -178,49 +201,76 @@ note "n1m/d-renamed was n1m/d0000000 (renamed in the 1,000,000-entry directory)"
 note "a/f1          file, hard-linked as b/f1-link: the newest link's name counts"
 note "a/f2          file; a link a/f2-tmp made and removed, then a new file got"
 note "              that name: the hint of a/f2 now names another object's entry"
+note "b/d4-stale    was a/d4, renamed with zfs_parent_cookie=0: its hint still"
+note "              names the removed a/d4 entry"
 look "Look at 'ok': every object's path must be right on both builds.  'cookie'"
-look "is zdb's new line (the fixed build only; master prints none: '-').  a/f2's"
-look "cookie still names the reused a/f2-tmp entry: it is checked and rejected,"
-look "and the name is found by the search."
+look "is zdb's new line (the fixed build only; master prints none: '-'): zdb"
+look "looks up the entry at the cookie and prints 'valid' if it is the object's."
+look "a/f2's cookie names the reused a/f2-tmp entry and b/d4-stale's a removed"
+look "entry: both 'stale', rejected, and the names are found by searching."
+look "'names by' (fixed build): how ZFS found the names while the server"
+look "reconnected the directory and its parents: by cookie, or by a search."
 
 # object  expected path (from /exp)  expected id (directories) | - (files)
-OBJS="a/d3:c/a/d3:a/d3 b/d1-moved:c/b/d1-moved:a/d1 a/d2-renamed:c/a/d2-renamed:a/d2
-a/e1:c/a/e1:b/e2 b/e2:c/b/e2:a/e1 b/from-100k:c/b/from-100k:n100k/d0000000
-n1m/d-renamed:n1m/d-renamed:n1m/d0000000 a/f1:c/b/f1-link:- a/f2:c/a/f2:- a/f2-tmp:c/a/f2-tmp:-"
+#   expected cookie on the fixed build
+OBJS="a/d3:c/a/d3:a/d3:valid b/d1-moved:c/b/d1-moved:a/d1:valid
+a/d2-renamed:c/a/d2-renamed:a/d2:valid a/e1:c/a/e1:b/e2:valid b/e2:c/b/e2:a/e1:valid
+b/from-100k:c/b/from-100k:n100k/d0000000:valid n1m/d-renamed:n1m/d-renamed:n1m/d0000000:valid
+b/d4-stale:c/b/d4-stale:a/d4:stale a/f1:c/b/f1-link:-:valid a/f2:c/a/f2:-:stale
+a/f2-tmp:c/a/f2-tmp:-:valid"
 dirs=() cdirs=()
 for o in $OBJS; do
-	IFS=: read -r name path id <<<"$o"
+	IFS=: read -r name path id cs <<<"$o"
 	[ "$id" != - ] && dirs+=("$EXP/$path") cdirs+=("$MNT/$path")
 done
+FIXED=no
+[ -r $KSTAT ] && FIXED=yes
 H=$(python3 $NR handles $EXP "${dirs[@]}") || die "the file handle check failed"
 K=$(python3 $NR nfscheck "${cdirs[@]}") || die "the NFS client check failed"
-printf '\n %-14s %-18s %-18s %-37s %-16s %s\n' object "zdb path" "zdb cookie" "handle (server)" "NFS client: id" ok
-printf ' %-14s %-18s %-18s %-37s %-16s %s\n' -------------- ------------------ ------------------ ------------------------------------- ---------------- --
+printf '\n %-14s %-18s %-16s %-30s %-16s %-16s %s\n' object "zdb path" "zdb cookie" "handle (server)" "names by" "NFS client: id" ok
+printf ' %-14s %-18s %-16s %-30s %-16s %-16s %s\n' -------------- ------------------ ---------------- ------------------------------ ---------------- ---------------- --
 BAD=0
 for o in $OBJS; do
-	IFS=: read -r name path id <<<"$o"
+	IFS=: read -r name path id cs <<<"$o"
 	if [ "$name" = n1m/d-renamed ]; then f=$EXP/n1m/d-renamed; else f=$EXP/c/$name; fi
 	[ "$name" = a/f1 ] && f=$EXP/c/b/f1-link
 	obj=$(stat -c %i "$f")
 	z=$(zdb -ddddd $FS "$obj" 2>/dev/null)
 	zp=$(echo "$z" | awk '$1 == "path" { print $2; exit }')
-	zc=$(echo "$z" | awk '$1 == "cookie" { print $2; exit }')
+	zc=$(echo "$z" | awk '$1 == "cookie" { print $2 " " $3; exit }')
+	zs=${zc#* }
 	ok=yes
 	[ "$zp" = "/$path" ] || ok=NO
-	hp=- kc=-
+	# the fixed build: zdb's verdict on the cookie
+	[ $FIXED = yes ] && [ "$zs" != "$cs" ] && ok=NO
+	hp=- kc=- how=-
 	if [ "$id" != - ]; then
 		hp=$(echo "$H" | awk -F'\t' -v p="$EXP/$path" '$1 == p { print $2 }')
+		how=$(echo "$H" | awk -F'\t' -v p="$EXP/$path" '$1 == p { print $3 }')
 		kc=$(echo "$K" | awk -F'\t' -v p="$MNT/$path" '$1 == p { print $2 }')
 		[ "$hp" = "$EXP/$path" ] || ok=NO
 		[ "$kc" = "$id" ] || ok=NO
+		if [ "$how" != - ]; then
+			# kstat counts: cookie hits, stale, missing, searches; a
+			# valid cookie (and valid parents) must need no search,
+			# a stale one exactly one
+			read -r kh kstale kmiss ksearch <<<"$how"
+			want=0; [ "$cs" = stale ] && want=1
+			{ [ "$kstale" = "$want" ] && [ "$ksearch" = "$want" ] &&
+			    [ "$kmiss" = 0 ] && [ "$kh" -ge 1 ]; } || ok=NO
+			how="$kh cookie, $ksearch search"
+		fi
 	fi
 	[ "$ok" = yes ] || BAD=$((BAD + 1))
-	printf ' %-14s %-18s %-18s %-37s %-16s %s\n' "$name" "${zp:-?}" "${zc:--}" "$hp" "$kc" "$ok"
+	printf ' %-14s %-18s %-16s %-30s %-16s %-16s %s\n' "$name" "${zp:-?}" "${zc:--}" "${hp#$EXP/}" "$how" "$kc" "$ok"
 done
 echo
-note "(zdb path: relative to $FS; handle: the path the server kernel reconnected"
-note " for the directory's file handle after a cache drop; NFS client: the 'id'"
-note " file read through the client's directory fd after a server cache drop)"
+note "(zdb path: relative to $FS; zdb cookie: the hint and zdb's check of it;"
+note " handle: the path the server kernel reconnected for the directory's file"
+note " handle after a cache drop, relative to $EXP; names by: the dirent_name"
+note " kstat during that reconnect (the directory and its parents); NFS client:"
+note " the 'id' file read through the client's directory fd after a server"
+note " cache drop)"
 note "$BAD wrong of $(echo $OBJS | wc -w) objects"
 
 cleanup

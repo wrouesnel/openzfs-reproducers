@@ -18,7 +18,10 @@ each object the cookie of the directory entry that last linked it into its
 parent (`ZPL_PARENT_COOKIE`, written with `ZPL_PARENT` in the same SA
 update); `zfs_dirent_name()` looks up that one entry, checks that its value
 is the object, and searches only when it isn't. zdb prints the cookie as a
-new `cookie` line.
+new `cookie` line and checks it (`valid`: the entry at the cookie is the
+object's; `stale`: it isn't), and a new kstat, `dirent_name`, counts the
+names found by cookie (`cookie_hits`) and the directory searches
+(`searches`) for stale or missing cookies.
 
 The demo (`demo.sh`, helper `nr.py`) measures everything from the NFS client
 and `/proc`, as `wrouesnel/fix-nfs-reconnect-name` does:
@@ -32,7 +35,10 @@ and `/proc`, as `wrouesnel/fix-nfs-reconnect-name` does:
    then the same 400 from 4 clients at once (the server drops its dentry and
    inode caches before each storm). The table shows per reconnect (median
    client lookup), p90, nfsd CPU, wall time, and `x smallest`: per reconnect
-   divided by the same client count's value in the 10,000-entry directory.
+   divided by the same client count's value in the 10,000-entry directory,
+   and `cookie/search` (fixed build): the names ZFS found by cookie and by
+   searching during the storm (`dirent_name` kstat; about 400/0 with the
+   cookie, `-` on master, which has no such kstat and always searches).
 4. **Correctness**, in `/exp/c` and the big directories: a directory never
    renamed, a rename into another directory, a rename within a directory, a
    `RENAME_EXCHANGE` (renameat2) between two directories, moves out of the
@@ -41,13 +47,21 @@ and `/proc`, as `wrouesnel/fix-nfs-reconnect-name` does:
    `a/f2-tmp` of `a/f2` made and removed, then a new file named `a/f2-tmp`,
    so `a/f2`'s cookie names an entry that now holds another object (the same
    hash and collision differentiator, so the same cookie: zdb shows `a/f2`
-   and `a/f2-tmp` with the same cookie). For each object: zdb's `path`
-   (`zfs_obj_to_path()` in libzpool) and `cookie`; for each directory also
-   the path the server kernel reconnects for its file handle
-   (`name_to_handle_at`, cache drop, `open_by_handle_at`, `/proc/self/fd`)
-   and the NFS client's view (the `id` file read through a directory fd held
-   across a server cache drop). Every path must be right on both builds; on
-   master the `cookie` column is `-` (zdb has no such line).
+   and `a/f2-tmp` with the same cookie), and a stale cookie on a directory:
+   `a/d4` renamed to `b/d4-stale` with `zfs_parent_cookie=0`, which renames
+   as an implementation that doesn't know the cookie does (the cookie still
+   names the removed `a/d4` entry). For each object: zdb's `path`
+   (`zfs_obj_to_path()` in libzpool) and `cookie` with zdb's verdict; for
+   each directory also the path the server kernel reconnects for its file
+   handle (`name_to_handle_at`, cache drop, `open_by_handle_at`,
+   `/proc/self/fd`) with the `dirent_name` counts of that reconnect
+   (`names by`: the directory and its parents found by cookie, and the
+   searches), and the NFS client's view (the `id` file read through a
+   directory fd held across a server cache drop). Every path must be right
+   on both builds; on master the `cookie` and `names by` columns are `-`.
+   On the fixed build every cookie must be `valid` except `a/f2` and
+   `b/d4-stale` (`stale`), and only `b/d4-stale`'s reconnect may search
+   (exactly once).
 
 ## RESULT
 
@@ -56,10 +70,12 @@ and `/proc`, as `wrouesnel/fix-nfs-reconnect-name` does:
 run are compared, never absolute times.
 
 - `RESULT BUG` if `R1 >= 10` and `R4 >= 10`: reconnects grow with the directory.
-- `RESULT OK` if `R1 < 3` and `R4 < 3`, and every path is right.
+- `RESULT OK` if `R1 < 3` and `R4 < 3`, and every path is right (and,
+  on the fixed build, every cookie state and search count as above).
 - Otherwise the scaling step runs once more; still in between: `RESULT ERROR`.
 - Any wrong path: `RESULT ERROR` on either build (master is slow, not
-  wrong; a wrong path on the fixed build would be a bug in the change).
+  wrong; a wrong path on the fixed build would be a bug in the change);
+  on the fixed build also a wrong cookie state or an unexpected search.
 
 ### Why 10 and 3
 
