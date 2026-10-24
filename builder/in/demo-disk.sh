@@ -1,5 +1,5 @@
 #!/bin/bash
-# demo-disk.sh ID REPRODIR USERLANDDIR OUTDIR [RESOLVED]   (userland builder, root)
+# demo-disk.sh ID REPRODIR USERLANDDIR OUTDIR [RESOLVED [PAYLOADINDEX]]   (userland builder, root)
 # Packs the demo disk of reproducer ID (USER/SLUG): everything about it that
 # doesn't depend on the OpenZFS build or the kernel, so every image of the
 # reproducer (repro-/fixed-, every target) shares this layer.
@@ -13,8 +13,11 @@
 # RESOLVED (builder/build.sh: work/resolved/USER-SLUG.conf) holds the commits
 # the build specs BUILD_repro and BUILD_fixed resolved to; repro.conf gets
 # them (BUILD_*) after the specs (SPEC_*), and the ZTS scripts come from them.
+# PAYLOADINDEX (builder/build.sh payload: lines "TARGET PART DIR") puts what
+# the reproducer's payload.sh built on the disk as /payload/TARGET/PART, as
+# it is: the library scan leaves it alone.
 set -euo pipefail
-ID=${1:?id} RD=${2:?reprodir} UD=${3:?userlanddir} O=${4:?outdir} RES=${5:-}
+ID=${1:?id} RD=${2:?reprodir} UD=${3:?userlanddir} O=${4:?outdir} RES=${5:-} PL=${6:-}
 W=$(mktemp -d /tmp/demo.XXXXXX) R=$W/root
 mkdir -p "$R"/{bin,lib} "$O"
 rm -rf "$O"/*
@@ -39,7 +42,7 @@ inext() { [ -f "$UD/bins" ] && grep -qxF "$1" "$UD/bins"; }
 } >"$W/repro.conf"
 { echo "BUG=$ID"; cat "$W/repro.conf"; } >"$R/manifest"
 for f in "$RD"/*; do
-	case ${f##*/} in bins | prep.sh | host.sh | reproducer.conf | patches | SOURCES* | *.c | *.md) ;; *) cp -R "$f" "$R/" ;; esac
+	case ${f##*/} in bins | prep.sh | host.sh | payload.sh | reproducer.conf | patches | SOURCES* | *.c | *.md) ;; *) cp -R "$f" "$R/" ;; esac
 done
 # KIND=zts: the ZTS scripts of both builds (zts-pack.sh), and the runner
 # (zts-run.sh) as demo.sh, with the tests it runs appended for reading
@@ -127,9 +130,9 @@ done < <(printf '%s\n' "$BINS")
 cp "$(dirname "$0")/guest/zr" "$R/bin/zr"
 [ -f "$RD/prep.sh" ] && bash "$RD/prep.sh" "$R"
 [ -n "${ZTS_PY:-}" ] && bash "$(dirname "$0")/python-stdlib.sh" "$R"
-# libraries the userland lacks
+# libraries the userland lacks (not for the payload: it brings its own)
 inbase() { grep -qxF "$1" "$UD/files"; }
-find "$R" -type f | while read -r f; do
+find "$R" -path "$R/payload" -prune -o -type f -print | while read -r f; do
 	[ "$(head -c4 "$f" | tail -c3)" = ELF ] || continue
 	ldd "$f" 2>/dev/null | grep -o '/[^ ]*' || true
 done | sort -u | while read -r l; do
@@ -137,11 +140,24 @@ done | sort -u | while read -r l; do
 	inbase "$l" || inbase "$(readlink -f "$l")" || { echo "adding $l (not in the userland)"; cp -L "$l" "$R/lib/"; echo "$l" >>"$W/extra"; }
 done
 rmdir "$R/bin" "$R/lib" 2>/dev/null || true
+if [ -n "$PL" ]; then
+	while read -r t p d; do
+		mkdir -p "$R/payload/$t"; cp -a "$d" "$R/payload/$t/$p"; rm -f "$R/payload/$t/$p/.done"
+	done <"$PL"
+	cp "$RD/payload.sh" "$R/payload/payload.sh"
+fi
 export E2FSPROGS_FAKE_TIME=${SOURCE_DATE_EPOCH:-0}
 find "$R" -exec touch -h -d "@${SOURCE_DATE_EPOCH:-0}" {} +
-kb=$(du -sk --apparent-size "$R" | cut -f1)
+kb=$(du -sk --apparent-size "$R" | cut -f1) ni=1024
+if [ -n "$PL" ]; then	# a payload: many files (a root file system), whole blocks each
+	# (whole 4 KiB blocks per file, hard links counted once by du: count
+	# every file's blocks, plus the inode tables and 64 MiB of slack)
+	kb=$(find "$R" -type f -printf '%s\n' | awk '{ s += int(($1 + 4095) / 4096) * 4 } END { print s }')
+	n=$(find "$R" | wc -l); ni=$((n + n / 4 + 1024))
+	kb=$((kb + n * 4 / 10 + ni / 4 + 65536))
+fi
 truncate -s $(( (kb * 12 / 10 + 2048) * 1024 )) "$W/demo.img"
-mkfs.ext4 -q -F -L zfsdemo -m 0 -N 1024 -O ^has_journal -U clear -E root_owner=0:0,hash_seed=00000000-0000-0000-0000-000000000000 -d "$R" "$W/demo.img"
+mkfs.ext4 -q -F -L zfsdemo -m 0 -N $ni -O ^has_journal -U clear -E root_owner=0:0,hash_seed=00000000-0000-0000-0000-000000000000 -d "$R" "$W/demo.img"
 qemu-img convert -q -c -o compression_type=zlib -f raw -O qcow2 "$W/demo.img" "$O/demo.qcow2"
 cp "$W/repro.conf" "$O/repro.conf"
 cp "$R/demo.sh" "$O/"
@@ -164,6 +180,10 @@ for f in inspect.sh host.sh; do [ -f "$RD/$f" ] && cp "$RD/$f" "$O/"; done
 		echo "  /demo/bin/${b%%=*}: $(dpkg-query -S "$(readlink -f "$(command -v "${b#*=}")")" 2>/dev/null | head -1 | cut -d: -f1 || echo '?')"
 	done < <(printf '%s\n' "$BINS")
 	[ -s "$W/pkgs.txt" ] && { echo "Packages unpacked onto the demo disk (EXTRA_PKGS; Ubuntu snapshot ${SNAPSHOT:-?}):"; sed 's/^/  /' "$W/pkgs.txt"; }
+	if [ -n "$PL" ]; then
+		echo "Payload (payload.sh, built in each target's builder): /demo/payload/TARGET/PART"
+		while read -r t p d; do [ -f "$d/SOURCES.txt" ] && { echo "  $t/$p:"; sed 's/^/    /' "$d/SOURCES.txt"; }; done <"$PL"
+	fi
 	[ -f "$R/zts/repro/tests.list" ] && echo "ZTS scripts: /demo/zts/LABEL, from each build's commit (CDDL-1.0): $(cat "$R"/zts/*/commit | tr '\n' ';')"
 } >"$O/SOURCES.txt"
 du -sh "$R" | sed 's/^/demo tree: /'

@@ -21,6 +21,7 @@
 #   builder/build.sh zfs-user USERLAND REPO@SHA [CONFIGURE...]   OpenZFS tools
 #   builder/build.sh zfs-kmod TARGET REPO@SHA [CONFIGURE...]     OpenZFS modules
 #   builder/build.sh zfs-for ID TARGET...     the OpenZFS halves ID needs
+#   builder/build.sh payload ID               what ID's payload.sh builds (work/payload/ID)
 #   builder/build.sh demo ID                  the demo disk (work/demos/ID)
 #   builder/build.sh disks ID TARGET...       the build disks
 #   builder/build.sh images ID TARGET...      runtime, userland, kernel, demo, build layers
@@ -362,12 +363,53 @@ cmd_zfs_for() {	# ID TARGET...: both halves of each build
 		done
 	done
 }
+# payload.sh (optional, docs/reproducer-format.md "Payloads"): build-time
+# content of a reproducer that needs a target's builder, such as software
+# built against each OpenZFS build.  For every Linux target of ID, it runs
+# in that target's builder once as `payload.sh common OUT` and once per
+# build as `payload.sh LABEL OUT REPO SHA CONFIGURE...`; each OUT goes on the
+# demo disk as /demo/payload/TARGET/PART.  Cached in work/payload/USER-SLUG/
+# by payload.sh, the target's base.conf and (per build) its commit and
+# configuration.  Writes work/payload/USER-SLUG/index: "TARGET PART DIR".
+payload_key() {	# ID TARGET PART
+	{ hashof "reproducers/$1/payload.sh" "bases/$2/base.conf"; echo "$3"
+	  [ "$3" = common ] || { build_of "$1" "$3"; rconf "$1" CONFIGURE; }; } | sha256sum | cut -c1-16
+}
+cmd_payload() {	# ID: build what payload.sh makes, for every target
+	local id=$1 t p o idx rs
+	[ -f "$T/reproducers/$id/payload.sh" ] || return 0
+	resolve_id "$id" || exit 1
+	idx=$WORK/payload/$(idtag "$id")/index
+	mkdir -p "${idx%/*}"; : >"$idx.tmp"
+	for t in $(targets_of "$id"); do
+		[ "$(tconf "$t" OS)" = Linux ] || continue
+		for p in common $(labels "$id"); do
+			o=$WORK/payload/$(idtag "$id")/$t/$p-$(payload_key "$id" "$t" "$p")
+			if [ -f "$o/.done" ]; then echo "payload $id $t $p: cached"
+			else
+				echo "payload $id $t $p: building (payload.sh)"
+				rm -rf "$o.tmp"; mkdir -p "$o.tmp"
+				if [ "$p" = common ]; then
+					inb "$t" bash "/src/reproducers/$id/payload.sh" common "/work/${o#"$WORK"/}.tmp" || exit 1
+				else
+					rs=$(build_of "$id" "$p")
+					# shellcheck disable=SC2046
+					inb "$t" bash "/src/reproducers/$id/payload.sh" "$p" "/work/${o#"$WORK"/}.tmp" "${rs%@*}" "${rs##*@}" $(rconf "$id" CONFIGURE) || exit 1
+				fi
+				touch "$o.tmp/.done"; rm -rf "$o"; mv "$o.tmp" "$o"
+			fi
+			echo "$t $p /work/${o#"$WORK"/}" >>"$idx.tmp"
+		done
+	done
+	mv "$idx.tmp" "$idx"
+}
 cmd_demo() {
-	local id=$1 u f; u=${2:-$(root_userland "$id" "$(targets_of "$id" | head -1)")}; f=$(resfile "$id")
+	local id=$1 u f pl=; u=${2:-$(root_userland "$id" "$(targets_of "$id" | head -1)")}; f=$(resfile "$id")
 	if [ -n "$(uconf "$u" PARENT)" ]; then cmd_userland_ext "$u"
 	else [ -f "$WORK/userlands/$u/files" ] || cmd_userland "$u"; fi
 	resolve_id "$id" || exit 1
-	inb "$(ubuilder "$u")" bash /src/builder/in/demo-disk.sh "$id" "/src/reproducers/$id" "/work/userlands/$u" "/work/demos/$id" "/work/${f#"$WORK"/}"
+	if [ -f "$T/reproducers/$id/payload.sh" ]; then cmd_payload "$id"; pl=/work/payload/$(idtag "$id")/index; fi
+	inb "$(ubuilder "$u")" bash /src/builder/in/demo-disk.sh "$id" "/src/reproducers/$id" "/work/userlands/$u" "/work/demos/$id" "/work/${f#"$WORK"/}" $pl
 }
 cmd_disks() {	# ID TARGET...: each label's build disk for each target
 	local id=$1 t l u du dk o d; shift
@@ -725,7 +767,7 @@ EXTRA=${EXTRA:-}
 case $c in
 builder) cmd_builder "$@" ;;
 builder-load) cmd_builder_load "$@" ;;
-userland | kernel | demo | disks | images | push | plan | key | sizes | verify | inputs | resolve) "cmd_$c" "$@" ;;
+userland | kernel | payload | demo | disks | images | push | plan | key | sizes | verify | inputs | resolve) "cmd_$c" "$@" ;;
 userland-ext) cmd_userland_ext "$@" ;;
 kernel-ext) cmd_kernel_ext "$@" ;;
 base) base_of "$@" ;;

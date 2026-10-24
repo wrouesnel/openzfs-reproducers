@@ -23,6 +23,7 @@ and publishes them, as a pair, for the targets where both do.
 | `bins` | optional: extra programs from the userland builder's distribution (`NAME` or `NAME=SOURCE`), installed in `/demo/bin` |
 | `prep.sh` | optional: `bash prep.sh ROOT` runs in the builder on the demo disk's tree before the library scan |
 | `host.sh` | optional: host-side triggers, run by the orchestrator in the container (see "External triggers") |
+| `payload.sh` | optional: build-time content made in each target's builder, such as software built against each OpenZFS build, put on the demo disk as `/demo/payload/TARGET/PART` (see "Payloads") |
 | anything else | copied to the demo disk as it is (data files, ZTS scripts, ...) |
 
 The demo disk is ext4 and is mounted read-only on `/demo` in the VM. It holds
@@ -136,6 +137,39 @@ with triggers (`host.sh`) work the same way: every run boots its own VMs.
   `bash -x` trace of an Up, Enter run. ttyS2 is the host channel.
 - A demo **exports** its pool at the end and doesn't destroy it, so
   `--disk` can inspect the run disk later.
+
+### Payloads
+
+Some demos need more than programs from the userland builder: software
+compiled against each OpenZFS build, or another distribution's root file
+system. A reproducer with a `payload.sh` gets them made when its images are
+built (`builder/build.sh payload ID`, part of `demo` and `all`). For each
+Linux target the reproducer is built for, `payload.sh` runs in that
+target's builder container (its distribution, the kernel's headers in
+`/kernel/env`, network access), as root:
+
+```sh
+bash payload.sh common OUTDIR                          # once per target
+bash payload.sh LABEL OUTDIR REPO SHA CONFIGURE...     # once per build (repro, fixed)
+```
+
+LABEL's REPO@SHA is the build's resolved commit, and CONFIGURE the
+reproducer's `CONFIGURE`. Whatever it writes to OUTDIR goes, as it is, on
+the demo disk as `/demo/payload/TARGET/common` and `/demo/payload/TARGET/LABEL`
+(and `payload.sh` itself as `/demo/payload/payload.sh`); an
+`OUTDIR/SOURCES.txt` is added to the demo's SOURCES. The demo disk's
+library scan leaves the payload alone (it brings its own libraries). The
+outputs are cached in `work/payload/USER-SLUG/TARGET/PART-KEY`, KEY a hash
+of `payload.sh`, the target's `base.conf` and (per build) the commit and
+`CONFIGURE`. So the demo disk holds both builds' payloads, and a demo can
+use the other build's as well as its own (a demo that compares two builds,
+or formats with one and mounts with the other).
+
+A payload makes the demo layer as big as what it holds: use it only where
+the standard or extended base can't do. `wrouesnel/fix-nfs-reconnect-hint-v3-lustre`
+uses one: an AlmaLinux 9 root file system (`common`) and, per build,
+OpenZFS and Lustre built for the almalinux9 kernel; its demo runs Lustre in
+a chroot of each.
 
 ### The extended base
 
