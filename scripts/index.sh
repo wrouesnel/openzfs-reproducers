@@ -13,8 +13,18 @@ trap 'rm -rf "$tmp"' EXIT
 
 tok=$(curl -fsS "https://ghcr.io/token?scope=repository:wrouesnel/openzfs-reproducers:pull" |
     python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
-curl -fsS -H "Authorization: Bearer $tok" \
-    "https://ghcr.io/v2/wrouesnel/openzfs-reproducers/tags/list?n=10000" >"$tmp/tags.json"
+# GHCR returns at most 1000 tags per request: follow the pages (last=)
+last=; : >"$tmp/tags.txt"
+while :; do
+	page=$(curl -fsS -H "Authorization: Bearer $tok" \
+	    "https://ghcr.io/v2/wrouesnel/openzfs-reproducers/tags/list?n=1000${last:+&last=$last}" |
+	    python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin).get("tags") or []))')
+	[ -n "$page" ] || break
+	printf '%s\n' "$page" >>"$tmp/tags.txt"
+	[ "$(printf '%s\n' "$page" | wc -l)" -ge 1000 ] || break
+	last=$(printf '%s\n' "$page" | tail -1)
+done
+python3 -c 'import json,sys; print(json.dumps({"tags": [l.strip() for l in open(sys.argv[1]) if l.strip()]}))' "$tmp/tags.txt" >"$tmp/tags.json"
 for s in open merged closed; do
 	gh pr list -R openzfs/zfs --author wrouesnel --state "$s" --limit 300 \
 	    --json number,headRefName,state,title,url

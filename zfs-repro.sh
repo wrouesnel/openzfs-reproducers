@@ -31,8 +31,16 @@ registry_tags() {
 	reg=${IMAGE%%/*} repo=${IMAGE#*/}
 	tok=$(curl -fsS "https://$reg/token?scope=repository:$repo:pull" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 	[ -n "$tok" ] || die "no anonymous access to $IMAGE (is the package public?)"
-	curl -fsS -H "Authorization: Bearer $tok" "https://$reg/v2/$repo/tags/list?n=10000" | tr ',' '\n' |
-	    sed -n 's/.*"\([^"]*\)".*/\1/p' | grep -E '^(repro|fixed)-' || true
+	# at most 1000 tags per request: follow the pages (last=)
+	last=
+	while :; do
+		page=$(curl -fsS -H "Authorization: Bearer $tok" "https://$reg/v2/$repo/tags/list?n=1000${last:+&last=$last}" |
+		    tr ',' '\n' | sed -n 's/.*"\([^"]*\)".*/\1/p' | grep -v -x -e name -e tags -e "$repo")
+		[ -n "$page" ] || break
+		printf '%s\n' "$page"
+		[ "$(printf '%s\n' "$page" | wc -l)" -ge 1000 ] || break
+		last=$(printf '%s\n' "$page" | tail -n 1)
+	done | grep -E '^(repro|fixed)-' || true
 }
 reproducer_ids() {	# USER/SLUG of every reproducer in the repository
 	curl -fsS "https://api.github.com/repos/$SRC/git/trees/main?recursive=1" | tr ',' '\n' |
