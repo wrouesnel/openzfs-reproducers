@@ -69,12 +69,15 @@ def issues_cell(listed):
     return ", ".join(f"[#{n}](https://github.com/openzfs/zfs/issues/{n})"
                      for n in re.findall(r"\d+", listed or "")) or "–"
 
-def images(user, slug):
+def images(user, slug, c):
     out = {}
     for label in ("repro", "fixed"):
         pre = f"{label}-{user}-{slug}-"
         out[label] = sorted({t[len(pre):] for t in tags if t.startswith(pre)})
-    targets = sorted(set(out["repro"]) & set(out["fixed"]))
+    # a pair; or, for a reproducer with one build (a stress suite: fixed-
+    # only, a self-test: repro- only), that build's images
+    ls = [l for l in ("repro", "fixed") if c.get(f"BUILD_{l}")]
+    targets = sorted(set.intersection(*(set(out[l]) for l in ls))) if ls else []
     if not targets:
         return "not yet"
     names = sorted({re.sub(r"-\d.*$", "", t) for t in targets})
@@ -88,7 +91,10 @@ for path in sorted(l.strip() for l in open(f"{tmp}/confs.txt") if l.strip()):
     repo = c.get("REPO", f"https://github.com/{user}/zfs").removesuffix(".git")
     fixed = c.get("BUILD_fixed", "").rsplit("@", 1)[-1]
     if user == "wrouesnel":
-        have[br] = f"{user}/{slug}"
+        # the branch's own reproducer (named after it) wins over a
+        # companion (SLUG-stress and the like)
+        if br not in have or slug == re.sub(r"[^a-z0-9]+", "-", br.lower()).strip("-"):
+            have[br] = f"{user}/{slug}"
         head = branches.get(br)
         branch = f"[{br}]({repo}/tree/{br})"
         if head is None:
@@ -102,7 +108,7 @@ for path in sorted(l.strip() for l in open(f"{tmp}/confs.txt") if l.strip()):
     rows.append("| " + " | ".join([
         f"[{user}/{slug}](../reproducers/{user}/{slug}/)",
         bugs.get(br, "–"), branch, pr_cell(br, c.get("PRS")),
-        issues_cell(c.get("ISSUES")), images(user, slug), status,
+        issues_cell(c.get("ISSUES")), images(user, slug, c), status,
         c.get("TITLE", "").replace("|", "\\|")]) + " |")
 
 brows = []
@@ -133,7 +139,8 @@ why a fork branch has no reproducer.
 ## Reproducers
 
 "Bug" is the zfs-bug-hunt tracker number. "Images" counts the targets that
-have both a `repro-` and a `fixed-` image on GHCR. A branch note means the
+have both a `repro-` and a `fixed-` image on GHCR (for a reproducer with one
+build, such as a stress suite's `fixed-` only, that build's images). A branch note means the
 fork branch has moved past the commit the images are built from.
 
 | reproducer | bug | fork branch | upstream PR | issues | images | status | title |

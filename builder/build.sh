@@ -487,6 +487,15 @@ cmd_images() {	# ID TARGET...
 		cp -p "$D/repro.conf" "$D/demo.sh" "$ctx/d/repro/"
 		for f in demo.qcow2 inspect.sh host.sh; do [ -f "$D/$f" ] && cp -p "$D/$f" "$ctx/d/repro/"; done
 		cp -p "$D/SOURCES.txt" "$ctx/d/sources/"
+		# EXTRACT (reproducer.conf): files and directories of the
+		# reproducer that the image also holds as plain files, in
+		# /zfs-repro/repro/files/, so they can be extracted without
+		# booting (podman run --rm --entrypoint cat IMAGE PATH)
+		for f in $(rconf "$id" EXTRACT); do
+			[ -e "$T/reproducers/$id/$f" ] || { echo "$id: EXTRACT: no $f" >&2; return 1; }
+			mkdir -p "$ctx/d/repro/files"
+			tar -C "$T/reproducers/$id" --exclude=__pycache__ -cf - "$f" | tar -C "$ctx/d/repro/files" -xf -
+		done
 		$PODMAN build -q --timestamp 0 -t "$(tag_demo "$id" "$t")" --build-arg FROM="$kfrom" \
 		    -f "$T/builder/Containerfile.demo" "$ctx/d" >/dev/null
 		for l in $(labels "$id"); do

@@ -71,6 +71,7 @@ read them.
 | `EXTRA_PKGS` | packages of the userland builder's distribution (at its snapshot) to unpack on the demo disk: their programs on `/demo/bin`, their libraries on `/demo/lib` |
 | `BASE` | `ext`: boot the extended base (the extended userland and the target's full kernel module tree, see "The extended base") instead of the minimal one. Only for a reproducer that a missing tool blocks |
 | `PASS_ENV` | container environment variables the demo may read (space separated names): `podman run -e NAME=VALUE IMAGE` sets them, and the demo gets them in the VM with `eval "$(zr env)"` (see "Settings from the container's environment") |
+| `EXTRACT` | files or directories of the reproducer (space separated) that the image also holds as plain files in `/zfs-repro/repro/files/`, so they can be extracted without booting: `podman run --rm --entrypoint cat IMAGE /zfs-repro/repro/files/PATH` (they are on the demo disk, `/demo/PATH`, as well) |
 
 ### Build specs
 
@@ -199,6 +200,30 @@ A ZTS reproducer on the extended base can carry its own udev rules in
 before the tests (`wrouesnel/fix-zts-errata3-busy` uses one to make udev's
 probe as slow as on CI's VMs). `scripts/new-reproducer.sh` sets `BASE='ext'` when the tests use
 `load_scsi_debug`, `modprobe`, valgrind, gdb or `udevadm info/monitor`.
+
+## Stress suites and other companion reproducers
+
+Evidence a fix's PR cites beyond its reproducer (stress tests, long edge-case
+runs) ships as a reproducer too, so that reviewers can re-run it and extract
+its scripts. It is a **companion** of the fix branch's reproducer:
+
+- its directory is `reproducers/USER/SLUG-SUFFIX/` (`-stress`, ...), with
+  `BRANCH` naming the same branch, so its tag is
+  `fixed-USER-SLUG-SUFFIX-TARGET-KERNEL`;
+- it usually has only `BUILD_fixed` (the branch head) and
+  `EXPECT_fixed='RESULT OK'`: a suite of checks of the new code has nothing
+  to check on master. The builder, `--check` and `push` handle a reproducer
+  with one build (as `selftest-triggers`, which has only `BUILD_repro`);
+  `scripts/aliases.py` makes PR and issue aliases only for pairs;
+- its scripts go in a directory of the reproducer (copied to the demo disk,
+  `/demo/DIR/` in the VM), and its README shows how to extract them
+  (`podman run --rm --entrypoint ... IMAGE`, see
+  `wrouesnel/fix-nfs-reconnect-hint-v3-stress`);
+- its options (which tests, how long) come from the container's environment
+  (`PASS_ENV`, above); `--check` runs the defaults, sized to finish in
+  minutes, with a documented setting for the full-length run;
+- like any demo it shows the end state (`zpool status -v`, `zdb -b`, the
+  scrub) and prints one `RESULT` line, after a summary of what ran.
 
 ## ZTS reproducers
 
