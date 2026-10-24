@@ -28,7 +28,9 @@
 # Each run makes throwaway overlays of the base and new sparse run disks in
 # /runs (the container's writable layer; mount a volume there to keep them).
 # Environment: ZFS_REPRO_ACCEL (kvm|tcg), MEM, CPUS, TIMEOUT (override the
-# reproducer's defaults), ZFS_REPRO_RUNS (default /runs).
+# reproducer's defaults), ZFS_REPRO_RUNS (default /runs), and the variables
+# the reproducer lists in PASS_ENV, which the demo reads in the VM with
+# `eval "$(zr env)"` (podman run -e NAME=VALUE IMAGE; see passenv below).
 
 B=/zfs-repro/base R=/zfs-repro/repro Z=/zfs-repro/build
 SELF=$(readlink -f "$0")
@@ -62,6 +64,7 @@ info() {
 	say "      $(zv MARKER) ($(zv ZFS))"
 	say "      expect: $(zv EXPECT)$([ -n "$(zv RUNS)" ] && echo " (--check: $(zv RUNS) runs, at least $(zv MIN_MATCH | sed "s/^$/$(zv RUNS)/") matching)")"
 	for l in repro fixed; do [ "$l" = "$(zv LABEL)" ] || [ -z "$(rv "EXPECT_$l")" ] || say "  the $l image expects: $(rv "EXPECT_$l")"; done
+	[ -n "$(rv PASS_ENV)" ] && say "  env:    $(rv PASS_ENV) (podman run -e NAME=VALUE IMAGE; the demo reads them with zr env)"
 	say "  sources: /sources (podman run --rm IMAGE --sources)"
 }
 
@@ -103,16 +106,36 @@ setup() {
 	NETWORK=$(rv NETWORK); NETWORK=${NETWORK:-0}
 	HOSTIDS=$(rv HOSTIDS) RESULT_VM=$(rv RESULT_VM); RESULT_VM=${RESULT_VM:-0}
 	[ "$NETWORK" = 1 ] && [ "$VMS" != 2 ] && die "NETWORK=1 needs VMS=2"
+	passenv
 	RUN=${ZFS_REPRO_RUNS:-/runs}
 	mkdir -p "$RUN" || die "cannot create $RUN"
 	[ -w "$RUN" ] || die "$RUN is not writable (rootless podman may need :U on the volume, SELinux :Z)"
+}
+
+# PASS_ENV (reproducer.conf): the container environment variables the demo
+# may read.  Only those names pass, and only values made of
+# [A-Za-z0-9_.,:=+@%/-] (they are sent over the zr channel and eval'd in the
+# guest).  PASSENV holds NAME=VALUE ... of the ones that are set; `zr env`
+# in the guest prints them after its own VM= ... fields.
+passenv() {
+	local n val
+	PASSENV=
+	for n in $(rv PASS_ENV); do
+		[[ $n =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "PASS_ENV: bad name '$n'"
+		[ -n "${!n+x}" ] || continue
+		val=${!n}
+		[[ $val =~ ^[A-Za-z0-9_.,:=+@%/-]*$ ]] ||
+		    die "$n='$val': only letters, digits and _ . , : = + @ % / - can be passed to the VM"
+		PASSENV="$PASSENV $n=$val"
+	done
+	PASSENV=${PASSENV# }
 }
 
 hlog() { printf '%s %s\n' "$(date -u +%T)" "$*" >>"$HLOG"; }
 envfile() {
 	{
 		for k in ID LABEL BOOT RUNDISK MEM CPUS TIMEOUT DISKS BYTES VMS SHARED NETWORK HOSTIDS \
-		    RESULT_VM RUN D TS ACCEL CPU TMULT HLOG INSPECT; do
+		    RESULT_VM RUN D TS ACCEL CPU TMULT HLOG INSPECT PASSENV; do
 			printf '%s=%s\n' "$k" "$(q "${!k}")"
 		done
 	} >"$D/env"
@@ -351,7 +374,7 @@ handler() {
 		id=$2 verb=$3; shift 3
 		ZR_REPLY= rc=0
 		case $verb in
-		env) ZR_REPLY="VM=$i VMS=$VMS HOSTID=$(echo $HOSTIDS | cut -d' ' -f$((i + 1))) IP=$([ "$NETWORK" = 1 ] && echo "10.99.0.$((i + 1))") PEER=$([ "$NETWORK" = 1 ] && echo "10.99.0.$((2 - i))")" ;;
+		env) ZR_REPLY="VM=$i VMS=$VMS HOSTID=$(echo $HOSTIDS | cut -d' ' -f$((i + 1))) IP=$([ "$NETWORK" = 1 ] && echo "10.99.0.$((i + 1))") PEER=$([ "$NETWORK" = 1 ] && echo "10.99.0.$((2 - i))")${PASSENV:+ $PASSENV}" ;;
 		log) hlog "vm$i: $*" ;;
 		trigger | wait)
 			name=${1:-}; shift
@@ -409,6 +432,9 @@ banner() {
 	[ "$VMS" -gt 1 ] && say "   $VMS VMs$([ "$SHARED" = 1 ] && echo ', sharing the run disks')$([ "$NETWORK" = 1 ] && echo ', linked by a private network')"
 	[ -f "$R/host.sh" ] && say "   host.sh: this reproducer acts on the VMs from outside (log: $HLOG)"
 	say "   expect: $(zv EXPECT)"
+	if [ -n "$(rv PASS_ENV)" ]; then
+		say "   env:    ${PASSENV:-(none set)}; this demo reads $(rv PASS_ENV) (podman run -e NAME=VALUE IMAGE)"
+	fi
 	if [ -n "$INSPECT" ]; then
 		say "   INSPECTING $INSPECT: the demo is not run; Up, Enter imports the pool and checks it"
 	else
@@ -686,6 +712,8 @@ The image is one build: repro-... (the break) or fixed-... (the fix branch).
 --clean    delete the run disks and logs in /runs
 In the VM: Up, Enter runs the demo; poweroff ends it; Ctrl-] leaves at once.
 Run it with:  podman run --rm -it --device /dev/kvm IMAGE [LABEL]
+Environment:  podman run -e NAME=VALUE ... passes NAME to the demo when the
+              reproducer lists it in PASS_ENV (--info shows them)
 EOF
 	exit "${1:-2}"
 }

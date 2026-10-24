@@ -83,6 +83,12 @@ Options (after the image):
 | `--info`, `--sources` | what the image is, and the SOURCES of everything in it |
 | `--dry-run` | prints the qemu command line(s) |
 
+Some demos take settings from the container's environment, for example the
+tests a stress suite runs: `podman run --rm -it --device /dev/kvm -e
+NAME=VALUE IMAGE`. `--info` lists the names an image reads (`PASS_ENV` in
+[docs/reproducer-format.md](docs/reproducer-format.md)), and its README the
+values.
+
 `--check` with `--runs`: a reproducer can declare how many runs its check
 needs and how many must match (a flaky bug: `repro-` passes if at least one
 run of N shows the bug, `fixed-` only if none does). `--info` shows it.

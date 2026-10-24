@@ -70,6 +70,7 @@ read them.
 | `BLOCKED` | why this reproducer doesn't show its bug yet (docs/coverage.md): `builder/build.sh ids` and CI leave it out (`WITH_BLOCKED=1` includes it) |
 | `EXTRA_PKGS` | packages of the userland builder's distribution (at its snapshot) to unpack on the demo disk: their programs on `/demo/bin`, their libraries on `/demo/lib` |
 | `BASE` | `ext`: boot the extended base (the extended userland and the target's full kernel module tree, see "The extended base") instead of the minimal one. Only for a reproducer that a missing tool blocks |
+| `PASS_ENV` | container environment variables the demo may read (space separated names): `podman run -e NAME=VALUE IMAGE` sets them, and the demo gets them in the VM with `eval "$(zr env)"` (see "Settings from the container's environment") |
 
 ### Build specs
 
@@ -286,10 +287,28 @@ there is no such trigger. The other guest commands are:
 
 | guest command | what it does |
 |---|---|
-| `zr env` | prints `VM= VMS= HOSTID= IP= PEER=` for this VM (`eval "$(zr env)"`) |
+| `zr env` | prints `VM= VMS= HOSTID= IP= PEER=` for this VM, then the reproducer's `PASS_ENV` variables that are set in the container (`eval "$(zr env)"`) |
 | `zr setup` | sets this VM's hostid (from `HOSTIDS`) and network address |
 | `zr log TEXT` | writes a line to the host log |
 | `zr phase [N]` | prints the demo's phase, or sets it to N. The phase is kept in `/root/.zr-phase` and synced, so it survives a power cut |
+
+### Settings from the container's environment
+
+A demo that has options (which tests to run, how long) lists their variable
+names in `PASS_ENV`; the person running the image sets them with `-e`:
+
+```sh
+podman run --rm -it --device /dev/kvm -e STRESS_TAGS=churn,spill IMAGE
+```
+
+The orchestrator passes only the names in `PASS_ENV`, and only when they are
+set, and only values made of letters, digits and `_ . , : = + @ % / -` (it
+refuses to start otherwise: the values are evaluated in the guest). The demo
+reads them with `eval "$(zr env)"` and checks them itself (an unknown value
+should end in `RESULT ERROR` with the valid ones). The banner prints what was
+passed, and `--info` the names. Without `-e`, the demo uses its defaults, so
+`--check` (and CI) run the default configuration; to check another one, run
+the image with `-e ... --check`. Reproducers without `PASS_ENV` are unchanged.
 
 ### Built-in triggers
 
