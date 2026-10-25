@@ -79,11 +79,16 @@ def issues_cell(listed):
     return ", ".join(f"[#{n}](https://github.com/openzfs/zfs/issues/{n})"
                      for n in re.findall(r"\d+", listed or "")) or "–"
 
+TARGETS = set(os.listdir("bases"))
+
 def images(user, slug, c):
     out = {}
     for label in ("repro", "fixed"):
         pre = f"{label}-{user}-{slug}-"
-        out[label] = sorted({t[len(pre):] for t in tags if t.startswith(pre)})
+        # TARGET-KERNEL with a known TARGET: not a longer slug that starts
+        # the same (fix-x-v3-lustre's tags also start with fix-x-)
+        out[label] = sorted({t[len(pre):] for t in tags if t.startswith(pre)
+                             and any(t[len(pre):].startswith(k + "-") for k in TARGETS)})
     # a pair; or, for a reproducer with one build (a stress suite: fixed-
     # only, a self-test: repro- only), that build's images
     ls = [l for l in ("repro", "fixed") if c.get(f"BUILD_{l}")]
