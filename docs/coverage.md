@@ -59,6 +59,7 @@ printed the expected RESULT for both images on this machine.
 | fix-raidz-expand-replace-min-asize-v2 |  |  | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-raw-send-fs-ivset | #36 | PR #19310 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-readonly-export-busy | #121 |  | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
+| fix-readonly-export-busy-v3 | #121 |  | console demo (4 read-only exports/destroys, zpool status/list each step) | added now | ubuntu24: repro BUG 3/3, fixed OK 3/3 |
 | fix-rebuild-sm-load-deadlock | #141 |  | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-recv-embedded-blksz | #3 | PR #19280 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-recv-keylocation-missing | #35 | PR #19309 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
