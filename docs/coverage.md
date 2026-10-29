@@ -73,6 +73,7 @@ printed the expected RESULT for both images on this machine.
 | fix-userquota-id-parse | #13 | PR #19292 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zap-shrink-prefix-diff | #17 | PR #19326 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zarcsummary-connreset | #124 |  | console demo | added now | ubuntu24: repro BUG, fixed OK |
+| zts-arcsummary-connreset | #124 |  | ZTS (KIND=zts, extended base; repro = openzfs/zfs abd1561b80^ pinned, running the branch's test) | added now (test only: the fix landed as abd1561b80, #19547) | ubuntu24: repro BUG, fixed OK |
 | fix-zcp-clone-namecheck | #37 | PR #19311 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zcp-snapshot-namecheck | #33 | PR #19307 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zdb-simulated-ddt-errors | #194 | PR #19509 (open) | console demo | added now | ubuntu24: repro BUG (zdb -S exits 0 with an empty histogram), fixed OK (exit 52, "histogram is incomplete" on stderr), 3/3 each |
