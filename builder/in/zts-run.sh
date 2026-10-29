@@ -101,6 +101,17 @@ EOS
 		[ -e /etc/zfs/zed.d ] || ln -s /zfs/zed/etc /etc/zfs/zed.d
 		[ -e /usr/libexec/zfs/zed.d ] || ln -s /zfs/zed/libexec /usr/libexec/zfs/zed.d
 	fi
+	# `modinfo spl` / `modinfo zfs` (zarcsummary -d reads the tunables'
+	# descriptions with /sbin/modinfo NAME): on the extended base, whose
+	# module tree leaves out the distribution's spl and zfs, index the
+	# build's modules (/zfs/modules) under extra/ so kmod finds them by
+	# name. Loading is unchanged (modprobe.d's install lines insmod them)
+	Km=/lib/modules/$(uname -r)
+	if [ -f "$Km/modules.dep" ] && [ -x /sbin/depmod ] && [ -f /zfs/modules/zfs.ko ] &&
+	    ! /sbin/modinfo zfs >/dev/null 2>&1; then
+		mkdir -p "$Km/extra" && ln -sf /zfs/modules/spl.ko /zfs/modules/zfs.ko "$Km/extra/" &&
+		    /sbin/depmod -a && echo "# modinfo: the build's spl.ko and zfs.ko indexed in $Km/extra (depmod)"
+	fi
 	# udev's part: /dev/zfs for every user (90-zfs.rules, MODE 0666), and
 	# the /dev/zvol links (zts-udevadm), kept up to date; the extended
 	# userland (BASE=ext) runs udev itself
