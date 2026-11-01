@@ -64,6 +64,7 @@ printed the expected RESULT for both images on this machine.
 | fix-recv-embedded-blksz | #3 | PR #19280 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-recv-keylocation-missing | #35 | PR #19309 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-recv-promote-origin-lookup | #34 | PR #19308 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
+| fix-recv-write-compress-type | #237 |  | console demo | has reproducer | ubuntu24: repro BUG (wrong md5 / EIO), fixed OK |
 | fix-removal-sm-load-deadlock-v2 | flake table #52 | PR #19332 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-removal-sm-load-deadlock-v3 | flake table #52 | PR #19332 (review follow-up; not its head yet) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-remove-resilvering-mirror | #1 | PR #19278 (open) | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
