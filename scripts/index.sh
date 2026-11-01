@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # index.sh: regenerate docs/index.md, the table of what this repository holds:
 # each reproducer with its fork branch, zfs-bug-hunt bug number, upstream PR
-# (and its state) and which images are published on GHCR, then every branch
+# (and its state: open, closed, or fixed with the openzfs master commits it
+# landed as) and which images are published on GHCR, then every branch
 # of github.com/wrouesnel/zfs with its reproducer and PR.
 # Needs gh (authenticated) and network access; GHCR tags are read anonymously.
 # Usage: scripts/index.sh [OUT]   (default docs/index.md)
@@ -25,10 +26,15 @@ while :; do
 	last=$(printf '%s\n' "$page" | tail -1)
 done
 python3 -c 'import json,sys; print(json.dumps({"tags": [l.strip() for l in open(sys.argv[1]) if l.strip()]}))' "$tmp/tags.txt" >"$tmp/tags.json"
-for s in open merged closed; do
+# --state closed includes the merged PRs
+for s in open closed; do
 	gh pr list -R openzfs/zfs --author wrouesnel --state "$s" --limit 300 \
-	    --json number,headRefName,state,title,url
-done | python3 -c 'import json,sys; d=[]; [d.extend(json.loads(l)) for l in sys.stdin if l.strip()]; print(json.dumps(d))' >"$tmp/prs.json"
+	    --json number,headRefName,headRefOid,state,title,url
+done | python3 -c 'import json,sys; d={}; [d.update((p["number"], p) for p in json.loads(l)) for l in sys.stdin if l.strip()]; print(json.dumps(list(d.values())))' >"$tmp/prs.json"
+# commits only (no trees or blobs): enough for the commit messages
+git clone -q --bare --filter=tree:0 --single-branch --branch master \
+    https://github.com/openzfs/zfs.git "$tmp/openzfs.git"
+git -C "$tmp/openzfs.git" log --reverse --format='%H%x00%B%x01' master >"$tmp/master.log"
 git ls-remote https://github.com/wrouesnel/zfs.git 'refs/heads/*' >"$tmp/branches.txt"
 git ls-files 'reproducers/*/*/reproducer.conf' >"$tmp/confs.txt"
 
@@ -37,6 +43,24 @@ import json, os, re, shlex, sys, datetime, glob
 tmp, out = sys.argv[1], sys.argv[2]
 tags = json.load(open(f"{tmp}/tags.json")).get("tags") or []
 prs = json.load(open(f"{tmp}/prs.json"))
+
+# openzfs master commits by the PRs their "Closes #N" trailers name, oldest
+# first. Maintainers merge some PRs on GitHub and push others to master
+# themselves and close the PR; either way each commit carries the trailer.
+closes = {}
+for c in open(f"{tmp}/master.log").read().split("\x01"):
+    sha, _, body = c.strip().partition("\x00")
+    for n in re.findall(r"^Closes #(\d+)\s*$", body, re.M):
+        closes.setdefault(int(n), []).append(sha)
+
+def state(p):
+    if p["state"] == "OPEN":
+        return "open"
+    shas = closes.get(p["number"])
+    if not shas:
+        return "closed"
+    return "fixed (" + ", ".join(
+        f"[{x[:10]}](https://github.com/openzfs/zfs/commit/{x})" for x in shas) + ")"
 branches = {}
 for line in open(f"{tmp}/branches.txt"):
     sha, ref = line.split()
@@ -61,18 +85,28 @@ for line in open("docs/coverage.md"):
     if len(cols) > 3 and re.match(r"^[\w.-]+$", cols[1]) and cols[2].startswith("#"):
         bugs[cols[1]] = cols[2]
 
+prs_by_num = {p["number"]: p for p in prs}
 prs_by_branch = {}
 for p in prs:
     prs_by_branch.setdefault(p["headRefName"], []).append(p)
+    # a fork branch (fix-x-v2) whose commit is an open PR's head
+    for br, sha in branches.items():
+        if p["state"] == "OPEN" and sha == p["headRefOid"] and br != p["headRefName"]:
+            prs_by_branch.setdefault(br, []).append(p)
 
+states = {}
 def pr_cell(branch, listed):
-    seen, cells = set(), []
-    for p in sorted(prs_by_branch.get(branch, []), key=lambda p: p["number"]):
-        seen.add(p["number"])
-        cells.append(f"[#{p['number']}]({p['url']}) {p['state'].lower()}")
-    for n in re.findall(r"\d+", listed or ""):
-        if int(n) not in seen:
+    nums = [p["number"] for p in prs_by_branch.get(branch, [])]
+    nums += [int(n) for n in re.findall(r"\d+", listed or "")]
+    cells = []
+    for n in sorted(set(nums)):
+        p = prs_by_num.get(n)
+        if p is None:
             cells.append(f"[#{n}](https://github.com/openzfs/zfs/pull/{n})")
+            continue
+        if n not in states:
+            states[n] = state(p)
+        cells.append(f"[#{n}]({p['url']}) {states[n]}")
     return "<br>".join(cells) or "–"
 
 def issues_cell(listed):
