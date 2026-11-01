@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # index.sh: regenerate docs/index.md, the table of what this repository holds:
 # each reproducer with its fork branch, zfs-bug-hunt bug number, upstream PR
-# (and its state: open, closed, or fixed with the openzfs master commits it
-# landed as) and which images are published on GHCR, then every branch
+# (and its state: open, closed, or fixed, fixed[ci-only] or fixed[tests-only]
+# with the openzfs master commits it landed as) and which images are published on GHCR, then every branch
 # of github.com/wrouesnel/zfs with its reproducer and PR.
 # Needs gh (authenticated) and network access; GHCR tags are read anonymously.
 # Usage: scripts/index.sh [OUT]   (default docs/index.md)
@@ -31,15 +31,15 @@ for s in open closed; do
 	gh pr list -R openzfs/zfs --author wrouesnel --state "$s" --limit 300 \
 	    --json number,headRefName,headRefOid,state,title,url
 done | python3 -c 'import json,sys; d={}; [d.update((p["number"], p) for p in json.loads(l)) for l in sys.stdin if l.strip()]; print(json.dumps(list(d.values())))' >"$tmp/prs.json"
-# commits only (no trees or blobs): enough for the commit messages
-git clone -q --bare --filter=tree:0 --single-branch --branch master \
+# commits and trees, no blobs: the commit messages and the files they touch
+git clone -q --bare --filter=blob:none --single-branch --branch master \
     https://github.com/openzfs/zfs.git "$tmp/openzfs.git"
 git -C "$tmp/openzfs.git" log --reverse --format='%H%x00%B%x01' master >"$tmp/master.log"
 git ls-remote https://github.com/wrouesnel/zfs.git 'refs/heads/*' >"$tmp/branches.txt"
 git ls-files 'reproducers/*/*/reproducer.conf' >"$tmp/confs.txt"
 
 python3 - "$tmp" "$out" <<'EOF'
-import json, os, re, shlex, sys, datetime, glob
+import json, os, re, shlex, subprocess, sys, datetime, glob
 tmp, out = sys.argv[1], sys.argv[2]
 tags = json.load(open(f"{tmp}/tags.json")).get("tags") or []
 prs = json.load(open(f"{tmp}/prs.json"))
@@ -53,13 +53,26 @@ for c in open(f"{tmp}/master.log").read().split("\x01"):
     for n in re.findall(r"^Closes #(\d+)\s*$", body, re.M):
         closes.setdefault(int(n), []).append(sha)
 
+def scope(shas):
+    # fixed[ci-only]: only .github/ changed; fixed[tests-only]: only tests/
+    files = subprocess.run(["git", "-C", f"{tmp}/openzfs.git", "diff-tree",
+                            "--no-commit-id", "-r", "--name-only", "--stdin"],
+                           input="\n".join(shas) + "\n", capture_output=True,
+                           text=True, check=True).stdout.split()
+    tops = {f.split("/")[0] for f in files}
+    if tops == {".github"}:
+        return "fixed[ci-only]"
+    if tops == {"tests"}:
+        return "fixed[tests-only]"
+    return "fixed"
+
 def state(p):
     if p["state"] == "OPEN":
         return "open"
     shas = closes.get(p["number"])
     if not shas:
         return "closed"
-    return "fixed (" + ", ".join(
+    return scope(shas) + " (" + ", ".join(
         f"[{x[:10]}](https://github.com/openzfs/zfs/commit/{x})" for x in shas) + ")"
 branches = {}
 for line in open(f"{tmp}/branches.txt"):
