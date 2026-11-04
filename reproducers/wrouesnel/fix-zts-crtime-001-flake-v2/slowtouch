@@ -1,0 +1,18 @@
+#!/bin/bash
+# Demo-only stand-in for touch(1) (bug #120).  GNU touch creates a new file
+# with open(O_CREAT) and then sets its times with utimensat(fd, NULL).  This
+# wrapper does the same two steps but waits for the next second in between,
+# so the one-in-many-thousands CI timing happens on every run.
+for a in "$@"; do
+	case $a in
+	-*) ;;
+	*)
+		if [ ! -e "$a" ]; then
+			: >> "$a"
+			s=$(date +%s)
+			while [ "$(date +%s)" = "$s" ]; do sleep 0.01; done
+		fi
+		;;
+	esac
+done
+exec /usr/bin/touch "$@"
