@@ -2,7 +2,7 @@
 
 v3 of bug #152 ([openzfs/zfs#19441](https://github.com/openzfs/zfs/issues/19441)):
 [fix-resilver-unreadable-dtl-v3](https://github.com/wrouesnel/zfs/tree/fix-resilver-unreadable-dtl-v3),
-on openzfs/zfs master 2d1eb9281a. It is v2 (`fix-resilver-unreadable-dtl-v2`)
+on openzfs/zfs master a99330d3e2. It is v2 (rebased) (`fix-resilver-unreadable-dtl-v2`)
 with one change to the fix and one to the test:
 - the fix also drops the debug assertion
   `scn_min_txg < vdev_resilver_txg` in `vdev_dtl_should_excise()`, which
