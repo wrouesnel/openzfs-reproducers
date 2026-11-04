@@ -39,6 +39,18 @@ zstd-19 layer 4.4 MB, but unpacked 3-5 times larger on the user's disk; so
 the disks stay qcow2. The kernels are the distributions' compressed vmlinuz
 files, which don't compress further.
 
+## Tool variants (BASE='uutils')
+
+A tool variant's userland layer replaces the standard one (it is the parent's
+root plus the variant's programs), and its kernel layer is the standard
+target's, on top of it (docs/reproducer-format.md, "Tool variants").
+Measured 2026-11-04:
+
+| layer | root qcow2 | shared by |
+|---|---|---|
+| userland-ubuntu24-uutils | 16 MB (the standard root's 10 MB, plus uutils' 14 MB static binary, compressed) | every `BASE='uutils'` image on every Linux target |
+| kernel-ubuntu24-...-uutils | as the standard kernel layer (vmlinuz, initrd) | every `BASE='uutils'` image on ubuntu24 |
+
 ## The extended base (BASE='ext')
 
 Measured 2026-10-21 (unpacked: the file tree in the guest; layer: the

@@ -16,7 +16,7 @@
 #   builder/build.sh userland-ext U-ext       an extended userland (work/userlands/U-ext)
 #   builder/build.sh kernel-ext TARGET        a target's extended kernel layer:
 #                                             its full module tree (work/targets/T-ext)
-#   builder/build.sh base ID TARGET           the base of ID's images ('' or ext-HASH)
+#   builder/build.sh base ID TARGET           the base of ID's images ('', ext-HASH or VARIANT-HASH)
 #   builder/build.sh resolve ID [LABEL]       resolve the build specs now (below)
 #   builder/build.sh zfs-user USERLAND REPO@SHA [CONFIGURE...]   OpenZFS tools
 #   builder/build.sh zfs-kmod TARGET REPO@SHA [CONFIGURE...]     OpenZFS modules
@@ -87,14 +87,25 @@ userland_of() { tconf "$1" USERLAND; }
 # PARENT=U) and the targets' extended kernel layers (full module trees)
 # instead of the standard ones (docs/reproducer-format.md).  The OpenZFS
 # builds are the same either way (built with the parent userland).
+# BASE='VARIANT' (another name): a tool variant, userlands/U-VARIANT
+# (PARENT=U), the parent's root with some programs replaced, built by
+# builder/in/userland-VARIANT.sh (e.g. 'uutils': Ubuntu 26.04's Rust
+# mkdir).  It boots with the standard kernel layers.
 rbase() {
 	local b; b=$(rconf "$1" BASE)
-	case $b in '' | ext) echo "$b" ;; *) echo "$1: BASE='$b': only 'ext' (or nothing) is known" >&2; exit 1 ;; esac
+	case $b in
+	'' | ext) echo "$b" ;;
+	*[!a-z0-9]*) echo "$1: BASE='$b': not a base name" >&2; exit 1 ;;
+	*) if [ -f "$T/builder/in/userland-$b.sh" ] && ls "$T"/userlands/*-"$b"/userland.conf >/dev/null 2>&1; then echo "$b"
+	   else echo "$1: BASE='$b': no userlands/*-$b or builder/in/userland-$b.sh (known: ext, or a tool variant)" >&2; exit 1; fi ;;
+	esac
 }
 xuserland_of() { echo "$(userland_of "$1")-ext"; }	# TARGET: its extended userland
 root_userland() {	# ID TARGET: the userland ID's images boot on TARGET
-	if [ "$(rbase "$1")" = ext ]; then xuserland_of "$2"; else userland_of "$2"; fi
+	local b; b=$(rbase "$1")
+	if [ -n "$b" ]; then echo "$(userland_of "$2")-$b"; else userland_of "$2"; fi
 }
+uvariant() { local p; p=$(uconf "$1" PARENT); [ -n "$p" ] && echo "${1#"$p"-}"; }	# USERLAND: ext, a tool variant, or ''
 ubuilder() { local p; p=$(uconf "$1" PARENT); echo "u-${p:-$1}"; }	# an ext userland uses its parent's builder
 
 # ---- build specs ----------------------------------------------------------------
@@ -217,10 +228,17 @@ tag_runtime() { echo "$IMAGE:runtime-$(hashof runtime/Containerfile runtime/prun
 tag_userland() { echo "$IMAGE:userland-$1-$(cat "$WORK/userlands/$1/hash")"; }
 tag_kernel() { echo "$IMAGE:kernel-$1-$(kver "$1")"; }
 tag_kernel_ext() { echo "$IMAGE:kernel-$1-$(kver "$1")-ext-$(cat "$WORK/targets/$1-ext/hash")"; }
-base_of() {	# ID TARGET: '' (standard) or ext-HASH (the extended kernel layer's
-	# key), the image label io.github.wrouesnel.zfs-repro.base
-	[ "$(rbase "$1")" = ext ] || return 0
-	echo "ext-$(cmd_key kernel-ext "$2" | sed 's/.*-//' | cut -c1-12)"
+# a target's kernel layer on a tool variant's userland (BASE=VARIANT)
+tag_kernel_var() { echo "$IMAGE:kernel-$1-$(kver "$1")-$2-$(cat "$WORK/userlands/$(userland_of "$1")-$2/hash")"; }
+base_of() {	# ID TARGET: '' (standard), ext-HASH (the extended kernel layer's
+	# key) or VARIANT-HASH (the tool variant userland's key), the image
+	# label io.github.wrouesnel.zfs-repro.base
+	local b; b=$(rbase "$1")
+	case $b in
+	'') return 0 ;;
+	ext) echo "ext-$(cmd_key kernel-ext "$2" | sed 's/.*-//' | cut -c1-12)" ;;
+	*) echo "$b-$(cmd_key userland "$(root_userland "$1" "$2")" | sed 's/^userland-//' | cut -c1-12)" ;;
+	esac
 }
 tag_demo() { echo "localhost/zfs-repro-demo:$(idtag "$1")-$2"; }
 
@@ -327,6 +345,33 @@ cmd_kernel_ext() {
 		rm -rf "$o"; mv "$o.tmp" "$o"
 	) 9>"$o.lock"
 }
+# a tool variant's userland (BASE=VARIANT: userlands/U-VARIANT, PARENT=U):
+# the parent's root with builder/in/userland-VARIANT.sh's changes; a
+# standard userland otherwise (base.qcow2, files)
+cmd_userland_variant() {
+	local x=$1 p v o=$WORK/userlands/$1 h
+	p=$(uconf "$x" PARENT); v=$(uvariant "$x")
+	[ -n "$p" ] && [ -n "$v" ] && [ "$v" != ext ] || { echo "userland $x is not a tool variant" >&2; exit 1; }
+	h=$(cmd_key userland "$x" | sed 's/^userland-//' | cut -c1-12)
+	[ -f "$o/base.qcow2" ] && [ "$(cat "$o/hash" 2>/dev/null)" = "$h" ] && { echo "userland $x: cached"; return; }
+	[ -f "$WORK/userlands/$p/base.qcow2" ] || cmd_userland "$p"
+	mkdir -p "$WORK/userlands"
+	(
+		flock 9
+		[ -f "$o/base.qcow2" ] && [ "$(cat "$o/hash" 2>/dev/null)" = "$h" ] && { echo "userland $x: cached"; exit 0; }
+		rm -rf "$o.tmp"
+		inb "$(ubuilder "$x")" bash "/src/builder/in/userland-$v.sh" "$x" "/work/userlands/$x.tmp" "/work/userlands/$p" || exit 1
+		echo "$h" >"$o.tmp/hash"
+		rm -rf "$o"; mv "$o.tmp" "$o"
+	) 9>"$o.lock"
+}
+cmd_userland_any() {	# USERLAND: build it (standard, extended or a tool variant)
+	case $(uvariant "$1") in
+	'') [ -f "$WORK/userlands/$1/files" ] || cmd_userland "$1" ;;
+	ext) cmd_userland_ext "$1" ;;
+	*) cmd_userland_variant "$1" ;;
+	esac
+}
 zdir() {	# zdir user|kmod U|T REPO@SHA CONFIGURE...: the work dir of one OpenZFS half
 	local m=$1 b=$2 rs=$3; shift 3
 	case $m in
@@ -405,8 +450,7 @@ cmd_payload() {	# ID: build what payload.sh makes, for every target
 }
 cmd_demo() {
 	local id=$1 u f pl=; u=${2:-$(root_userland "$id" "$(targets_of "$id" | head -1)")}; f=$(resfile "$id")
-	if [ -n "$(uconf "$u" PARENT)" ]; then cmd_userland_ext "$u"
-	else [ -f "$WORK/userlands/$u/files" ] || cmd_userland "$u"; fi
+	cmd_userland_any "$u"
 	resolve_id "$id" || exit 1
 	if [ -f "$T/reproducers/$id/payload.sh" ]; then cmd_payload "$id"; pl=/work/payload/$(idtag "$id")/index; fi
 	inb "$(ubuilder "$u")" bash /src/builder/in/demo-disk.sh "$id" "/src/reproducers/$id" "/work/userlands/$u" "/work/demos/$id" "/work/${f#"$WORK"/}" $pl
@@ -467,7 +511,7 @@ cmd_images() {	# ID TARGET...
 	$PODMAN image exists "$(tag_runtime)" ||
 	    $PODMAN build -q -t "$(tag_runtime)" -f "$T/runtime/Containerfile" "$T/runtime" >/dev/null
 	echo "image $(tag_runtime)"
-	local ext kfrom; ext=$(rbase "$id")
+	local ext kfrom ktag; ext=$(rbase "$id")
 	for t in "$@"; do
 		u=$(userland_of "$t") from= kfrom=
 		if [ "$(tconf "$t" OS)" = FreeBSD ]; then
@@ -499,7 +543,9 @@ cmd_images() {	# ID TARGET...
 		echo "image $(tag_kernel_ext "$t")"
 		kfrom=$(tag_kernel_ext "$t")
 		elif [ -z "$from" ]; then
-		# userland: the root disk every target shares
+		# userland: the root disk every target shares (BASE=VARIANT: the
+		# tool variant's, U-VARIANT; it boots with the standard kernel layer)
+		[ -n "$ext" ] && { u=$(root_userland "$id" "$t"); cmd_userland_variant "$u" >/dev/null; }
 		rm -rf "$ctx/u"; mkdir -p "$ctx/u/base"
 		cp -p "$WORK/userlands/$u/base.qcow2" "$ctx/u/base/"; cp -p "$WORK/userlands/$u/SOURCES.txt" "$ctx/u/"
 		chmod 644 "$ctx/u/base/base.qcow2"
@@ -515,13 +561,14 @@ cmd_images() {	# ID TARGET...
 		rm -rf "$ctx/k"; mkdir -p "$ctx/k/base"
 		for f in vmlinuz initrd base.conf base.qcow2; do [ -f "$WORK/targets/$t/$f" ] && cp -p "$WORK/targets/$t/$f" "$ctx/k/base/" && chmod 644 "$ctx/k/base/$f"; done
 		cp -p "$WORK/targets/$t/SOURCES.txt" "$ctx/k/"
-		$PODMAN build -q --timestamp 0 -t "$(tag_kernel "$t")" --build-arg FROM="$from" \
+		ktag=$(tag_kernel "$t"); [ -n "$ext" ] && ktag=$(tag_kernel_var "$t" "$ext")
+		$PODMAN build -q --timestamp 0 -t "$ktag" --build-arg FROM="$from" \
 		    --label org.opencontainers.image.source="$SRCURL" \
 		    --label org.opencontainers.image.description="zfs-repro target $t: $(tconf "$t" DISTRO) kernel $(tconf "$t" KERNEL) (no reproducer)" \
 		    --label io.github.wrouesnel.zfs-repro.target="$t" --label io.github.wrouesnel.zfs-repro.kernel="$(tconf "$t" KERNEL)" \
 		    -f "$T/builder/Containerfile.kernel" "$ctx/k" >/dev/null
-		echo "image $(tag_kernel "$t")"
-		kfrom=$(tag_kernel "$t")
+		echo "image $ktag"
+		kfrom=$ktag
 		fi
 		# demo: the same layer content for every target and build
 		rm -rf "$ctx/d"; mkdir -p "$ctx/d/repro" "$ctx/d/sources"
@@ -564,7 +611,7 @@ cmd_images() {	# ID TARGET...
 			[ -n "$(rconf "$id" AUTHOR)" ] && lbl "io.github.wrouesnel.zfs-repro.author=$(rconf "$id" AUTHOR)"
 			[ -n "$(rconf "$id" PRS)" ] && lbl "io.github.wrouesnel.zfs-repro.prs=$(rconf "$id" PRS)"
 			[ -n "$(rconf "$id" ISSUES)" ] && lbl "io.github.wrouesnel.zfs-repro.issues=$(rconf "$id" ISSUES)"
-			[ "$ext" = ext ] && lbl "io.github.wrouesnel.zfs-repro.base=$(base_of "$id" "$t")"
+			[ -n "$ext" ] && lbl "io.github.wrouesnel.zfs-repro.base=$(base_of "$id" "$t")"
 			aargs=(); for a in "${largs[@]}"; do [ "$a" = --label ] && aargs+=(--annotation) || aargs+=("$a"); done
 			$PODMAN build -q --timestamp 0 -t "$(img_of "$id" "$l" "$t")" --build-arg FROM="$(tag_demo "$id" "$t")" \
 			    -f "$T/builder/Containerfile.build" "${largs[@]}" "${aargs[@]}" "$ctx/b" >/dev/null
@@ -708,6 +755,8 @@ cmd_inputs() {
 		cmd_key kernel "$t"; [ "$(tconf "$t" OS)" = Linux ] && cmd_key userland "$u"
 		# BASE=ext: the extended layers (its key covers the ext userland's)
 		[ "$(rbase "$id")" = ext ] && [ "$(tconf "$t" OS)" = Linux ] && cmd_key kernel-ext "$t"
+		# BASE=VARIANT: the tool variant's userland
+		case $(rbase "$id") in '' | ext) ;; *) [ "$(tconf "$t" OS)" = Linux ] && cmd_key userland "$(root_userland "$id" "$t")" ;; esac
 		hashof runtime/Containerfile runtime/prune.sh runtime/zfs-repro-vm
 		hashof builder/in/demo-disk.sh builder/in/zts-pack.sh builder/in/zts-run.sh builder/in/zts-udevadm builder/in/zts-sudo builder/in/zvol_name.c builder/in/build-disk.sh \
 		    builder/in/demo-common.sh builder/in/python-stdlib.sh builder/in/fio.sh builder/in/zfs.sh builder/in/guest/zr builder/zts-tools.txt \
@@ -717,7 +766,11 @@ cmd_inputs() {
 cmd_key() {	# cache keys: what each output depends on
 	local u t rs
 	case $1 in
-	userland) if [ -n "$(uconf "$2" PARENT)" ]; then	# an extended userland: its own inputs and its parent's
+	userland) case $(uvariant "$2") in '' | ext) ;; *)	# a tool variant: its script, its conf and its parent's key
+	             echo "userland-$( { hashof "builder/in/userland-$(uvariant "$2").sh" "userlands/$2/userland.conf"; cmd_key userland "$(uconf "$2" PARENT)"; } | sha256sum | cut -c1-16)"
+	             return ;;
+	          esac
+	          if [ -n "$(uconf "$2" PARENT)" ]; then	# an extended userland: its own inputs and its parent's
 	             echo "userland-$( { hashof builder/in/userland-ext.sh builder/in/fio.sh builder/in/zvol_name.c "userlands/$2/userland.conf"; cmd_key userland "$(uconf "$2" PARENT)"; } | sha256sum | cut -c1-16)"
 	             return
 	          fi

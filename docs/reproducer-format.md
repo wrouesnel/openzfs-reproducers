@@ -70,7 +70,7 @@ read them.
 | `ZTS_ITERATIONS` | `KIND=zts`: how many times one demo runs the tests (a flake: `RESULT BUG` if any run fails) |
 | `BLOCKED` | why this reproducer doesn't show its bug yet (docs/coverage.md): `builder/build.sh ids` and CI leave it out (`WITH_BLOCKED=1` includes it) |
 | `EXTRA_PKGS` | packages of the userland builder's distribution (at its snapshot) to unpack on the demo disk: their programs on `/demo/bin`, their libraries on `/demo/lib` |
-| `BASE` | `ext`: boot the extended base (the extended userland and the target's full kernel module tree, see "The extended base") instead of the minimal one. Only for a reproducer that a missing tool blocks |
+| `BASE` | `ext`: boot the extended base (the extended userland and the target's full kernel module tree, see "The extended base") instead of the minimal one. Only for a reproducer that a missing tool blocks. `uutils` (a tool variant, see "Tool variants"): the standard base with Ubuntu 26.04's Rust `mkdir` |
 | `PASS_ENV` | container environment variables the demo may read (space separated names): `podman run -e NAME=VALUE IMAGE` sets them, and the demo gets them in the VM with `eval "$(zr env)"` (see "Settings from the container's environment") |
 | `EXTRACT` | files or directories of the reproducer (space separated) that the image also holds as plain files in `/zfs-repro/repro/files/`, so they can be extracted without booting: `podman run --rm --entrypoint cat IMAGE /zfs-repro/repro/files/PATH` (they are on the demo disk, `/demo/PATH`, as well) |
 
@@ -234,6 +234,28 @@ A ZTS reproducer on the extended base can carry its own udev rules in
 before the tests (`wrouesnel/fix-zts-errata3-busy` uses one to make udev's
 probe as slow as on CI's VMs). `scripts/new-reproducer.sh` sets `BASE='ext'` when the tests use
 `load_scsi_debug`, `modprobe`, valgrind, gdb or `udevadm info/monitor`.
+
+### Tool variants
+
+Some bugs show only with one implementation or version of a tool, for
+example a test that relies on an exit status one `mkdir` gives and another
+doesn't. `BASE='VARIANT'` boots a tool variant of the standard userland:
+`userlands/U-VARIANT/userland.conf` (`PARENT=U`), the parent's root as
+built with some programs replaced by `builder/in/userland-VARIANT.sh`, and
+otherwise the standard base (the same kernel layers and demo disk; the
+tool variant has no udev or module tree). Pin what it adds (version, URL,
+sha256). It is the target's userland, so the program is the one at
+`/usr/bin/NAME` that tests run.
+
+| Variant | What it changes | Why |
+|---|---|---|
+| `uutils` | `/usr/bin/mkdir` (`UUTILS` in `userlands/ubuntu24-uutils/userland.conf`) is uutils coreutils 0.8.0, upstream's static release build (pinned by sha256) | Ubuntu 26.04 ships uutils 0.8.0 as its coreutils (`rust-coreutils`); its own package needs glibc 2.43, newer than the ubuntu24 root's. uutils `mkdir` exits 0 when mkdir(2) fails with EIO but the directory exists afterwards (GNU exits 1) |
+
+The variant's layers are tagged `userland-U-VARIANT-HASH` and
+`kernel-TARGET-KERNEL-VARIANT-HASH`; the reproducers' label
+`io.github.wrouesnel.zfs-repro.base` is `VARIANT-HASH` (the variant
+userland's cache key), so changing it makes `scripts/build-local.sh` build
+the images again.
 
 ## Stress suites and other companion reproducers
 
@@ -499,4 +521,5 @@ built against. `builder/in/kernel.sh` packs the kernel and, if virtio or ext4
 aren't built in, an initramfs. `userlands/NAME/userland.conf` is the root file
 system every Linux target of that architecture boots
 (`builder/in/userland.sh`); `userlands/NAME-ext` (with `PARENT=NAME`) is its
-extended userland, for `BASE='ext'` (above). See docs/targets.md.
+extended userland, for `BASE='ext'` (above), and `userlands/NAME-VARIANT`
+a tool variant (`BASE='VARIANT'`, "Tool variants"). See docs/targets.md.
