@@ -1,0 +1,7 @@
+# zfs-repro (fix-zts-copies-006-busy): udev's watch rule (60-block.rules) makes
+# udev probe a zvol again when a writer closes it, holding it open.  In this
+# small VM that probe takes milliseconds; on CI's slower VMs it took long
+# enough that zfs_copies_006_pos's destroy, issued right after the ext2
+# umount, failed with "dataset is busy".  Holding the zvol open for 2 s on
+# that "change" event makes the race as wide as there.
+ACTION=="change", SUBSYSTEM=="block", KERNEL=="zd*", RUN+="/bin/sh -c 'exec 3<$env{DEVNAME}; sleep 2'"
