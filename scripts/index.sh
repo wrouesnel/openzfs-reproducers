@@ -10,7 +10,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 out=${1:-docs/index.md}
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+# Only the files written below; rmdir fails on anything else. No rm -rf.
+trap 'rm -f "${tmp:?}"/tags.txt "${tmp:?}"/tags.json "${tmp:?}"/prs.json "${tmp:?}"/master.log "${tmp:?}"/branches.txt "${tmp:?}"/confs.txt; rmdir "${tmp:?}"' EXIT
 
 tok=$(curl -fsS "https://ghcr.io/token?scope=repository:wrouesnel/openzfs-reproducers:pull" |
     python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
@@ -31,10 +32,17 @@ for s in open closed; do
 	gh pr list -R openzfs/zfs --author wrouesnel --state "$s" --limit 300 \
 	    --json number,headRefName,headRefOid,state,title,url
 done | python3 -c 'import json,sys; d={}; [d.update((p["number"], p) for p in json.loads(l)) for l in sys.stdin if l.strip()]; print(json.dumps(list(d.values())))' >"$tmp/prs.json"
-# commits and trees, no blobs: the commit messages and the files they touch
-git clone -q --bare --filter=blob:none --single-branch --branch master \
-    https://github.com/openzfs/zfs.git "$tmp/openzfs.git"
-git -C "$tmp/openzfs.git" log --reverse --format='%H%x00%B%x01' master >"$tmp/master.log"
+# commits and trees, no blobs: the commit messages and the files they touch;
+# kept in work/ (ignored) and fetched on later runs
+oz=work/index/openzfs.git
+if [ -d "$oz" ]; then
+	git -C "$oz" fetch -q origin master:master
+else
+	mkdir -p work/index
+	git clone -q --bare --filter=blob:none --single-branch --branch master \
+	    https://github.com/openzfs/zfs.git "$oz"
+fi
+git -C "$oz" log --reverse --format='%H%x00%B%x01' master >"$tmp/master.log"
 git ls-remote https://github.com/wrouesnel/zfs.git 'refs/heads/*' >"$tmp/branches.txt"
 git ls-files 'reproducers/*/*/reproducer.conf' >"$tmp/confs.txt"
 
@@ -55,7 +63,7 @@ for c in open(f"{tmp}/master.log").read().split("\x01"):
 
 def scope(shas):
     # fixed[ci-only]: only .github/ changed; fixed[tests-only]: only tests/
-    files = subprocess.run(["git", "-C", f"{tmp}/openzfs.git", "diff-tree",
+    files = subprocess.run(["git", "-C", "work/index/openzfs.git", "diff-tree",
                             "--no-commit-id", "-r", "--name-only", "--stdin"],
                            input="\n".join(shas) + "\n", capture_output=True,
                            text=True, check=True).stdout.split()
