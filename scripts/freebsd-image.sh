@@ -28,6 +28,17 @@ WORK=${ZFS_REPRO_WORK:-$T/work}
 B=$T/builder/build.sh
 conf() { (set +u; . "$1" >/dev/null; eval "printf '%s' \"\${$2:-}\""); }
 q() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+# fresh DIR FILE...: recreate DIR empty, removing only the files this script
+# writes into it (no rm -rf); anything else in DIR stops the import
+fresh() {
+	local d=$1 f; shift
+	if [ -d "$d" ]; then
+		for f; do rm -f "${d:?}/$f"; done
+		rmdir "$d" 2>/dev/null ||
+		    { echo "$d holds files this script didn't write:" >&2; ls -A "$d" >&2; exit 1; }
+	fi
+	mkdir -p "$d"
+}
 c=${1:?usage: see the header}; shift
 case $c in
 target)
@@ -36,7 +47,7 @@ target)
 	[ "$(conf "$bc" OS)" = FreeBSD ] || { echo "$bc: OS is not FreeBSD" >&2; exit 1; }
 	[ "$(conf "$man" KERNEL)" = "$(conf "$bc" KERNEL)" ] ||
 	    { echo "the disk has kernel $(conf "$man" KERNEL), $bc says $(conf "$bc" KERNEL)" >&2; exit 1; }
-	o=$WORK/targets/$t; rm -rf "$o"; mkdir -p "$o"
+	o=$WORK/targets/$t; fresh "$o" base.qcow2 base.conf SOURCES.txt
 	cp "$img" "$o/base.qcow2"
 	{
 		echo "NAME=$(q "$t")"
@@ -80,7 +91,7 @@ repro)
 		[ -n "$have" ] && [ "${want#"$have"}" != "$want" ] ||
 		    { echo "build $l: the disk has '$have' as $ll, reproducer.conf wants $want" >&2; exit 1; }
 	done
-	d=$WORK/demos/$id; rm -rf "$d"; mkdir -p "$d"
+	d=$WORK/demos/$id; fresh "$d" demo.sh inspect.sh repro.conf SOURCES.txt
 	cp "$rd/demo.sh" "$d/"; [ -f "$rd/inspect.sh" ] && cp "$rd/inspect.sh" "$d/"
 	{
 		echo "# reproducer $id (reproducers/$id/reproducer.conf)"
@@ -99,7 +110,7 @@ repro)
 	} >"$d/SOURCES.txt"
 	for p in repro:bug fixed:fix; do
 		l=${p%%:*} ll=${p#*:}
-		o=$WORK/builds/$id/$t/$l; rm -rf "$o"; mkdir -p "$o"
+		o=$WORK/builds/$id/$t/$l; fresh "$o" build.qcow2 build.conf SOURCES.txt
 		cp "$img" "$o/build.qcow2"
 		{
 			echo "# the OpenZFS build of this image (scripts/freebsd-image.sh)"
