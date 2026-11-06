@@ -1,0 +1,222 @@
+# SPDX-License-Identifier: CDDL-1.0
+#
+# census.kshlib: the census hooks of raidz_expand_boundary_census.ksh, which
+# prep.sh (this reproducer) makes from each build's own
+# tests/functional/raidz/raidz_expand_boundary_repair.ksh.  The test's setup
+# and search loop run as they are, except that the loop goes on until the
+# reflow is done instead of stopping at the first qualifying block (or the
+# try budget), and calls these hooks:
+#
+#   census_budget=N     before the loop: the build's try budget (0: none)
+#   census_stop OFF     after each stop, with the pool exported: records the
+#                       reflow offset; returns 1 when the reflow is done
+#   census_judge OFF    after the build's own check of the stop: was a block
+#                       found (the build's own condition), and if not, why not
+#   census_report       after the loop: the stop list, the summary, and
+#                       log_pass / log_fail by the build's own search rule
+#
+# The reasons are worked out from the file's block map (zdb, as file_blocks
+# in the test) with the same condition as the test: a block straddles the
+# offset with a full row on either side, starts in the damaged area, and its
+# column on disk 0 is data, not parity.
+#   *  a block qualifies here (the build's own check found it)
+#   -  in the file's data, but no block qualifies (chance: where in the
+#      block the stop is, which column is the parity, or on the edge between
+#      two blocks)
+#   x  no block can qualify: outside the file's data (a metaslab boundary,
+#      which no allocation crosses; free space between pieces of the file;
+#      past its end), or the reflow is done (offset 0)
+#
+
+# A try budget is spent badly when this many tries can never find a
+# straddling block.  Master's 20 tries: in every census run so far (fork CI
+# 42102468050, 10 runs in a VM, 15 runs of this image) its search reached the
+# end of the reflow within 12 or 13 stops, so 7 or 8 tries always come after
+# the reflow is done, and 1 to 6 stops before that were outside the file's
+# data (metaslab boundaries, free space between its pieces, past its end):
+# 9 to 13 of the 20 can never qualify.  8 (two fifths) is below all of
+# them.  The fix stops nowhere outside the file's data before its end.
+typeset -ri census_threshold=8
+# A gap of this much or more between two of the file's blocks is free space
+# between pieces of the file (master's file is in 8 pieces, with whole free
+# 64M metaslabs between some); a smaller one holds other blocks (metadata).
+typeset -ri census_gapmin=$((4 << 20))
+typeset -i census_budget=0 census_n=0 census_q0=0 census_msz=0 census_fend=0
+typeset -a census_off census_mark census_why
+typeset census_out=/run/zts/census census_blocks= census_shift=
+
+function census_mib # bytes
+{
+	printf "%.1fM" $(( $1 / 1048576.0 ))
+}
+
+function census_stop # offset
+{
+	typeset -i o=$1
+	if [[ -z $census_blocks ]]; then
+		census_shift=$(zdb -e -p $devdir -C $TESTPOOL | \
+		    awk '$1 == "metaslab_shift:" { print $2; exit }')
+		[[ -n $census_shift ]] && census_msz=$((1 << census_shift))
+		census_blocks=$devdir/census.blocks
+		file_blocks $object | sort -n >$census_blocks
+		census_fend=$(awk '{ e = $1 + $2; if (e > m) m = e } END { printf "%d", m }' \
+		    $census_blocks)
+		log_note "CENSUS metaslabs of $(census_mib $census_msz), the file has" \
+		    "$(wc -l <$census_blocks) blocks from" \
+		    "$(census_mib $(head -1 $census_blocks | cut -d' ' -f1)) to" \
+		    "$(census_mib $census_fend), damaged from $(census_mib $offset1)"
+	fi
+	(( census_n += 1 ))
+	census_off[census_n]=$o
+	if (( o == 0 )); then
+		census_mark[census_n]=x
+		census_why[census_n]="the reflow is done (offset 0)"
+		log_note "CENSUS stop $census_n: x ${census_why[census_n]}"
+		return 1
+	fi
+	census_q0=$straddling
+	return 0
+}
+
+function census_judge # offset
+{
+	typeset -i o=$1
+	typeset r
+	r=$(awk -v o=$o -v o1=$offset1 -v rs=$rowsize -v devs=$devs \
+	    -v msz=$census_msz -v fend=$census_fend -v gapmin=$census_gapmin '
+	    function mib(b) { return sprintf("%.1fM", b / 1048576) }
+	    {
+		e = $1 + $2
+		if ($1 < o && o < e) { off = $1; as = $2; inb = 1 }
+		if (e <= o && e > pe) pe = e
+		if ($1 >= o && (ns == "" || $1 < ns)) ns = $1
+	    }
+	    END {
+		if (!inb) {
+			gap = ns - pe
+			if (o >= fend) {
+				print "x no block of the file here: past its end"
+			} else if (msz > 0 && o % msz == 0) {
+				# allocations never cross a metaslab boundary
+				print "x no block of the file here: metaslab boundary"
+			} else if (gap >= gapmin) {
+				print "x no block of the file here: free space (a " \
+				    mib(gap) " gap between pieces of the file)"
+			} else if (gap == 0) {
+				print "- on the edge between two blocks"
+			} else {
+				print "- in a " gap / 1024 "K gap between two blocks"
+			}
+			exit
+		}
+		b = "block at " mib(off) " (" as / 1024 "K)"
+		col = (int(off / 4096) + int(off / 1048576) % 2) % devs
+		if (off < o1) r = "starts before the damaged area"
+		else if (off + rs > o) r = "the stop is in its first row"
+		else if (o + 2 * rs > off + as) r = "the stop is in its last two rows"
+		else if (col == 0) r = "its column on disk 0 is the parity"
+		else r = "(?)"
+		print "- " b ": " r
+	    }' $census_blocks)
+	census_off[census_n]=$o
+	if (( straddling > census_q0 )); then
+		census_mark[census_n]="*"
+		census_why[census_n]="a block straddles it (the test's own check)"
+		[[ $r == "- "* ]] && census_why[census_n]="${r#- }" &&
+		    census_why[census_n]="${census_why[census_n]%%: *} straddles it"
+	else
+		census_mark[census_n]=${r%% *}
+		census_why[census_n]=${r#? }
+	fi
+	log_note "CENSUS stop $census_n: ${census_mark[census_n]} ${census_why[census_n]}"
+}
+
+function census_report
+{
+	typeset -i i n=0 hit=0 first=0 miss=0 never=0 done=0 pastend=0 badnever=0
+	typeset -i lim=$census_n
+	(( census_budget > census_n )) && lim=$census_budget
+	{
+	echo "========================================================================"
+	echo "CENSUS of this build's search for a block across the reflow offset"
+	echo "(raidz_expand_boundary_repair.ksh of commit $(cut -d" " -f1 $STF_SUITE/commit 2>/dev/null))"
+	if (( census_budget > 0 )); then
+		echo "its loop: up to $census_budget tries, ends at the first '*'"
+	else
+		echo "its loop: no try budget, ends at the first '*' or when the reflow is done"
+	fi
+	echo "first pause: reflow offset $offset1 ($(census_mib $offset1));" \
+	    "metaslabs of $(census_mib $census_msz);" \
+	    "the file's blocks end at $(census_mib $census_fend)"
+	echo "  * a block qualifies  - in the file's data, none qualifies  x none can qualify"
+	echo "   try  reflow offset"
+	for (( i = 1; i <= lim; i++ )); do
+		if (( i > census_n )); then
+			# a budget beyond the census: the reflow is done, the
+			# build's loop would see offset 0 again on every try
+			if (( i == census_n + 1 )); then
+				printf " %5s %10d %9s  %s %s\n" "$i-$census_budget" 0 "" x \
+				    "the reflow is done (offset 0): the loop tries on"
+			fi
+			(( never += 1, done += 1 ))
+			continue
+		fi
+		typeset -i o=${census_off[i]}
+		typeset m=${census_mark[i]} w=${census_why[i]}
+		printf " %5d %10d %9s  %s %s\n" $i $o \
+		    "$( (( o > 0 )) && census_mib $o)" "$m" "$w"
+		(( census_budget > 0 && i > census_budget )) && continue
+		case $m in
+		'*') (( hit += 1, n += 1 )); (( first == 0 )) && first=$i ;;
+		-) (( miss += 1, n += 1 )) ;;
+		x) (( never += 1 ))
+		   if (( o == 0 )); then
+			(( done += 1 ))
+		   elif [[ $w == *"past its end" ]]; then
+			(( pastend += 1 ))
+		   else
+			(( badnever += 1 ))
+		   fi ;;
+		esac
+	done
+	echo "------------------------------------------------------------------------"
+	if (( census_budget > 0 )); then
+		echo "of its $census_budget tries: $n stopped in the file's data ($hit of" \
+		    "them qualify), $((never - done)) outside the file's data, $done after" \
+		    "the reflow was done"
+		if (( first > 0 )); then
+			echo "this run its test would find a block at try $first; it SKIPs" \
+			    "in a run where all $n data stops miss"
+		else
+			echo "this run its test would SKIP: no try qualifies"
+		fi
+		echo "=> $never of its $census_budget tries can never find a straddling block" \
+		    "(BUG at $census_threshold or more)"
+	else
+		echo "$((n + badnever)) stops before the file's end: $n in its data" \
+		    "($hit of them qualify), $badnever outside the file's data; then" \
+		    "$pastend past the file's end, and the reflow was done"
+		if (( first > 0 )); then
+			echo "its loop stops at the first one, stop $first"
+		else
+			echo "its loop finds no block (SKIP)"
+		fi
+		echo "=> every stop before the file's end is in its data: $( (( badnever == 0 )) && echo yes || echo no);" \
+		    "a block qualifies: $( (( hit > 0 )) && echo yes || echo no)"
+	fi
+	echo "========================================================================"
+	} >$devdir/census.txt
+	cat $devdir/census.txt
+	# the runner prints it again just before the RESULT (prep.sh)
+	[[ -d ${census_out%/*} ]] && cp $devdir/census.txt $census_out
+	if (( census_budget > 0 )); then
+		(( never >= census_threshold )) && log_fail "$never of its" \
+		    "$census_budget tries can never find a straddling block"
+		log_pass "only $never of its $census_budget tries can never find" \
+		    "a straddling block"
+	fi
+	(( badnever == 0 && hit > 0 )) || log_fail "the search stopped" \
+	    "$badnever times before the file's end outside the file's data, $hit qualified"
+	log_pass "every stop before the file's end is in its data, $hit qualify" \
+	    "(the first: stop $first)"
+}
