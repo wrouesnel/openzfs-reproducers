@@ -111,6 +111,7 @@ printed the expected RESULT for both images on this machine.
 | fix-zts-zstream-raw-001-cleanup | #20 | PR #19283 | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-zvol-set-removing | #45 | PR #19319 | ZTS test | added now | ubuntu24: repro PANIC, fixed OK |
 | zts-import-rewind-ckpt-txg | #136 |  | ZTS test | added now | ubuntu24 with 8 vCPUs: repro BUG (5+ of 60 runs), fixed OK (60 of 60) |
+| issue18908-reverse-large-block (openzfs master, no fix branch) |  | issue #18908 | console demo (repro only, no fixed-) | added now | ubuntu24: repro RESULT REFUSED 3/3 on master c913da8615 (zfs send -L incremental refused after a first send without -L) |
 | fix-corrective-recv-abd-lifetime | #21 | PR #19323 |  | blocked | single fix commit, no test and no console demo (#21): needs a hand-written demo |
 | fix-initramfs-libcurl-symlink | #67 |  |  | blocked | the test runs mkinitramfs with the build's initramfs-tools hook: needs a Debian/Ubuntu root with initramfs-tools, klibc and a kernel module tree, and the hook installed from the build; beyond the userland (a special userland is still to do) |
 | fix-pyzfs-tempool-cleanup |  | PR #19327 |  | blocked | single fix commit (merged as #19327) to pyzfs's test cleanup; pyzfs needs Python bindings the userland lacks |
