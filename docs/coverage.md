@@ -59,6 +59,9 @@ printed the expected RESULT for both images on this machine.
 | fix-raidz-expand-old-rows-recon | #73, #111, #137 |  | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-raidz-expand-replace-min-asize | #2 | PR #19279 | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-raidz-expand-replace-min-asize-v2 |  |  | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
+| fix-raidz-expand-rangelock-intr-v2 | #245 |  | ZTS test | added now | ubuntu24: repro BUG 3/3 (z_rd_int hung), fixed OK 3/3 |
+| fix-resilver-unreadable-dtl-v8 | #152 | issue #19441 | console demo | added now | ubuntu24: repro BUG 3/3, fixed OK 3/3 |
+| fix-rebuild-unreadable-source | #273 |  | console demo | added now | ubuntu24: repro BUG 3/3, fixed OK 3/3 |
 | fix-raw-send-fs-ivset | #36 | PR #19310 | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-readonly-export-busy | #121 |  | ZTS test | added now | ubuntu24: repro BUG, fixed OK |
 | fix-readonly-export-busy-v3 | #121 |  | console demo (4 read-only exports/destroys, zpool status/list each step) | added now | ubuntu24: repro BUG 3/3, fixed OK 3/3 |
