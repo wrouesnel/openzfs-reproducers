@@ -1,0 +1,10 @@
+#!/bin/bash
+# /demo/bin/zhack (tigerblue77/range-tree-recover-overlap): the PR's tests
+# call `zhack metaslab append`, which the PR adds.  Use the image's own
+# zhack when it has that subcommand (the fixed image: the PR head); else the
+# zhack prep.sh built from the repro commit plus the PR's cmd/zhack.c
+# (/demo/zhack-pr/README), which uses this build's own libraries.
+own=/zfs/sbin/zhack
+if "$own" 2>&1 | grep -q 'metaslab append'; then exec "$own" "$@"; fi
+[ -x /demo/zhack-pr/zhack ] || { echo "zhack wrapper: no /demo/zhack-pr/zhack" >&2; exit 127; }
+exec /demo/zhack-pr/zhack "$@"
