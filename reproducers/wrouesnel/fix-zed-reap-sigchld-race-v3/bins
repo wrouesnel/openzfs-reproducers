@@ -1,0 +1,6 @@
+# from the userland builder (util-linux): taskset, which the test pins ZED
+# and its zedlets to CPU 0 with, and flock, which the zedlets' zed_lock
+# (zed-functions.sh) takes the debug log's lock with (ZTS commands.cfg lists
+# both; without flock all-debug.sh fails its lock and runs differently from CI)
+taskset
+flock
