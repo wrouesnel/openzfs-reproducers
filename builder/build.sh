@@ -26,6 +26,10 @@
 #   builder/build.sh disks ID TARGET...       the build disks
 #   builder/build.sh images ID TARGET...      runtime, userland, kernel, demo, build layers
 #   builder/build.sh check ID TARGET [LABEL...]   podman run IMAGE --check (+ --disk)
+#   builder/build.sh try ID TARGET ZFS-CHECKOUT   build ID's demo against the WORKING
+#                                             TREE of a local OpenZFS checkout (edits
+#                                             included, nothing committed) and run it;
+#                                             local only: image try-..., never pushed
 #   builder/build.sh push ID TARGET [LABEL...]    push the images (after check)
 #   builder/build.sh tag ID LABEL TARGET      an image's tag
 #   builder/build.sh targets ID | ids | labels ID
@@ -41,7 +45,9 @@
 #
 # Environment: ZFS_REPRO_IMAGE (default ghcr.io/wrouesnel/openzfs-reproducers),
 # ZFS_REPRO_WORK (default ./work), PODMAN (default podman), CHECK_ARGS (extra
-# --check arguments, e.g. --runs 20), RESULTS_FILE, VERBOSE, REUSE_RESOLVED.
+# --check arguments, e.g. --runs 20), RESULTS_FILE, VERBOSE, REUSE_RESOLVED,
+# ZFS_REPRO_TRY_IMAGE (the repository of `try` images, default
+# localhost/openzfs-reproducers).
 set -euo pipefail
 T=$(cd "$(dirname "$0")/.." && pwd)
 IMAGE=${ZFS_REPRO_IMAGE:-ghcr.io/wrouesnel/openzfs-reproducers}
@@ -49,6 +55,11 @@ WORK=${ZFS_REPRO_WORK:-$T/work}
 PODMAN=${PODMAN:-podman}
 SRCURL=https://github.com/wrouesnel/openzfs-reproducers
 mkdir -p "$WORK"
+# `try` (a local working tree, docs/reproducer-format.md "Iterating on a
+# fix"): its one build is LABEL try, its outputs are under $WORK/try and its
+# images in a local repository, never $IMAGE
+TRY= TRY_IMAGE=${ZFS_REPRO_TRY_IMAGE:-localhost/openzfs-reproducers}
+DEMOS=$WORK/demos BUILDS=$WORK/builds RUNS=$WORK/runs
 
 conf() { (set +u; . "$1"; eval "printf '%s' \"\${$2:-}\""); }
 tconf() { [ -f "$T/bases/$1/base.conf" ] || { echo "no target $1 (bases/$1/base.conf)" >&2; exit 1; }; conf "$T/bases/$1/base.conf" "$2"; }
@@ -81,7 +92,7 @@ targets_of() {	# the targets a reproducer is built for
 	ts="$ts $(rconf "$1" LOCAL_TARGETS)"
 	for t in $ts; do case $skip in *" $t "*) ;; *) echo "$t" ;; esac; done
 }
-labels() { local l; for l in repro fixed; do [ -n "$(rconf "$1" "BUILD_$l")" ] && echo "$l"; done; }
+labels() { local l; [ -n "$TRY" ] && { echo try; return; }; for l in repro fixed; do [ -n "$(rconf "$1" "BUILD_$l")" ] && echo "$l"; done; }
 userland_of() { tconf "$1" USERLAND; }
 # BASE='ext' in reproducer.conf: the extended userland (userlands/U-ext,
 # PARENT=U) and the targets' extended kernel layers (full module trees)
@@ -223,7 +234,7 @@ tag_of() {
 	s=${s:0:$max}; s=${s%-}
 	echo "$l-$u-$s-$h$tail"
 }
-img_of() { echo "$IMAGE:$(tag_of "$@")"; }
+img_of() { if [ "$2" = try ]; then echo "$TRY_IMAGE:$(tag_of "$@")"; else echo "$IMAGE:$(tag_of "$@")"; fi; }
 tag_runtime() { echo "$IMAGE:runtime-$(hashof runtime/Containerfile runtime/prune.sh runtime/zfs-repro-vm | cut -c1-12)"; }
 tag_userland() { echo "$IMAGE:userland-$1-$(cat "$WORK/userlands/$1/hash")"; }
 tag_kernel() { echo "$IMAGE:kernel-$1-$(kver "$1")"; }
@@ -240,7 +251,7 @@ base_of() {	# ID TARGET: '' (standard), ext-HASH (the extended kernel layer's
 	*) echo "$b-$(cmd_key userland "$(root_userland "$1" "$2")" | sed 's/^userland-//' | cut -c1-12)" ;;
 	esac
 }
-tag_demo() { echo "localhost/zfs-repro-demo:$(idtag "$1")-$2"; }
+tag_demo() { echo "localhost/zfs-repro-demo:${TRY:+try-}$(idtag "$1")-$2"; }
 
 # ---- builders -----------------------------------------------------------------
 builder_img() { echo "localhost/zfs-repro-builder:$1"; }
@@ -572,7 +583,7 @@ cmd_images() {	# ID TARGET...
 		fi
 		# demo: the same layer content for every target and build
 		rm -rf "$ctx/d"; mkdir -p "$ctx/d/repro" "$ctx/d/sources"
-		D=$WORK/demos/$id
+		D=$DEMOS/$id
 		cp -p "$D/repro.conf" "$D/demo.sh" "$ctx/d/repro/"
 		for f in demo.qcow2 inspect.sh host.sh; do [ -f "$D/$f" ] && cp -p "$D/$f" "$ctx/d/repro/"; done
 		cp -p "$D/SOURCES.txt" "$ctx/d/sources/"
@@ -588,7 +599,7 @@ cmd_images() {	# ID TARGET...
 		$PODMAN build -q --timestamp 0 -t "$(tag_demo "$id" "$t")" --build-arg FROM="$kfrom" \
 		    -f "$T/builder/Containerfile.demo" "$ctx/d" >/dev/null
 		for l in $(labels "$id"); do
-			o=$WORK/builds/$id/$t/$l
+			o=$BUILDS/$id/$t/$l
 			[ -f "$o/build.qcow2" ] || { echo "no build disk $l for $id on $t: builder/build.sh disks $id $t" >&2; return 1; }
 			rm -rf "$ctx/b"; mkdir -p "$ctx/b/build" "$ctx/b/sources"
 			cp -p "$o/build.qcow2" "$o/build.conf" "$ctx/b/build/"
@@ -597,7 +608,7 @@ cmd_images() {	# ID TARGET...
 			largs=()
 			lbl "org.opencontainers.image.source=$SRCURL"
 			lbl "org.opencontainers.image.title=zfs-repro $id ($l) on $t"
-			lbl "org.opencontainers.image.description=$( [ "$l" = repro ] && echo 'unfixed' || echo 'fixed'): $(rconf "$id" TITLE)"
+			lbl "org.opencontainers.image.description=$(case $l in repro) echo 'unfixed' ;; fixed) echo 'fixed' ;; *) echo 'UNPUBLISHED local working tree' ;; esac): $(rconf "$id" TITLE)"
 			lbl "org.opencontainers.image.licenses=CDDL-1.0 AND GPL-2.0-only AND GPL-2.0-or-later AND GPL-3.0-or-later"
 			lbl "org.opencontainers.image.revision=$(git -C "$T" rev-parse HEAD 2>/dev/null || echo unknown)"
 			lbl "io.github.wrouesnel.zfs-repro.id=$id"
@@ -612,6 +623,12 @@ cmd_images() {	# ID TARGET...
 			[ -n "$(rconf "$id" PRS)" ] && lbl "io.github.wrouesnel.zfs-repro.prs=$(rconf "$id" PRS)"
 			[ -n "$(rconf "$id" ISSUES)" ] && lbl "io.github.wrouesnel.zfs-repro.issues=$(rconf "$id" ISSUES)"
 			[ -n "$ext" ] && lbl "io.github.wrouesnel.zfs-repro.base=$(base_of "$id" "$t")"
+			# try: not a public commit; cmd_push and build-local.sh refuse these
+			if [ "$l" = try ]; then
+				lbl "io.github.wrouesnel.zfs-repro.unpublished=$(conf "$o/build.conf" UNPUBLISHED)"
+				lbl "io.github.wrouesnel.zfs-repro.worktree-base=$(conf "$o/build.conf" WORKTREE_BASE)"
+				lbl "io.github.wrouesnel.zfs-repro.worktree-diff=$(conf "$o/build.conf" WORKTREE_DIFF)"
+			fi
 			aargs=(); for a in "${largs[@]}"; do [ "$a" = --label ] && aargs+=(--annotation) || aargs+=("$a"); done
 			$PODMAN build -q --timestamp 0 -t "$(img_of "$id" "$l" "$t")" --build-arg FROM="$(tag_demo "$id" "$t")" \
 			    -f "$T/builder/Containerfile.build" "${largs[@]}" "${aargs[@]}" "$ctx/b" >/dev/null
@@ -640,7 +657,7 @@ kvm_args() {
 cmd_check() {	# ID TARGET [LABEL...]: --check every image; RESULTS_FILE gets one line per image
 	local id=$1 t=$2 l rc=0 out runs disk lrc res; shift 2
 	local ls=("$@"); [ ${#ls[@]} -gt 0 ] || read -ra ls <<<"$(labels "$id" | tr '\n' ' ')"
-	runs=$WORK/runs/$(idtag "$id")/$t; mkdir -p "$runs"
+	runs=$RUNS/$(idtag "$id")/$t; mkdir -p "$runs"
 	for l in "${ls[@]}"; do
 		echo "== $(tag_of "$id" "$l" "$t") --check ${CHECK_ARGS:-}"
 		lrc=0
@@ -662,9 +679,150 @@ cmd_check() {	# ID TARGET [LABEL...]: --check every image; RESULTS_FILE gets one
 	return $rc
 }
 
+# ---- try: a local working tree --------------------------------------------------
+# try ID TARGET ZFS-CHECKOUT: ID's demo against the OpenZFS source in a local
+# git checkout AS IT IS NOW, edits included (docs/reproducer-format.md,
+# "Iterating on a fix").  The checkout is only read: its working tree
+# (tracked files and untracked ones that aren't ignored) is snapshotted into
+# a commit object in $WORK/try/git (a temporary index, the objects written
+# there; the checkout's index, refs and object store are untouched).  The
+# build is incremental: the snapshot is checked out into a persistent source
+# tree per target (git read-tree -u rewrites only the files that changed)
+# and built in place (builder/in/zfs-tree.sh), so an edit recompiles only
+# what it touches; the userland, kernel and builder layers come from the
+# usual caches.  KIND=zts: the ZTS scripts come from the same snapshot.  The
+# image is $TRY_IMAGE:try-USER-SLUG-TARGET-KERNEL, labelled unpublished;
+# push refuses it.  Prints the RESULT; exits 0 for RESULT OK, 1 for RESULT
+# BUG (or a panic), 2 otherwise.
+tgit() { git --git-dir="$WORK/try/git" "$@"; }
+try_snapshot() {	# CHECKOUT: sets SNAP (commit), SNAP_HEAD, SNAP_DIFF (sha256 of the diff, '' if clean)
+	local co=$1 top objs idx tree
+	top=$(git -C "$co" rev-parse --show-toplevel 2>/dev/null) || { echo "try: $co is not a git checkout" >&2; return 1; }
+	[ -f "$top/autogen.sh" ] && [ -f "$top/META" ] && [ -d "$top/module/zfs" ] || { echo "try: $top is not an OpenZFS checkout" >&2; return 1; }
+	SNAP_HEAD=$(git -C "$top" rev-parse --verify -q 'HEAD^{commit}') || { echo "try: $top has no HEAD commit" >&2; return 1; }
+	objs=$(git -C "$top" rev-parse --path-format=absolute --git-path objects)
+	mkdir -p "$WORK/try"
+	[ -d "$WORK/try/git" ] || { git init -q --bare "$WORK/try/git"; tgit config gc.auto 0; }
+	# the checkout's objects, read through an alternate (never written)
+	grep -qxF "$objs" "$WORK/try/git/objects/info/alternates" 2>/dev/null || echo "$objs" >>"$WORK/try/git/objects/info/alternates"
+	idx=$(mktemp "$WORK/try/index.XXXXXX"); rm -f "$idx"
+	tree=$(
+		export GIT_INDEX_FILE=$idx GIT_OBJECT_DIRECTORY=$WORK/try/git/objects
+		g() { git -C "$top" -c gc.auto=0 -c core.fsmonitor=false -c core.untrackedCache=false -c core.autocrlf=false "$@"; }
+		g read-tree "$SNAP_HEAD" && g add -A . && g write-tree
+	) || { rm -f "$idx" "$idx.lock"; echo "try: cannot snapshot $top" >&2; return 1; }
+	rm -f "$idx"
+	if [ "$tree" = "$(git -C "$top" rev-parse "$SNAP_HEAD^{tree}")" ]; then SNAP_DIFF=
+	else SNAP_DIFF=$(tgit diff --binary "$SNAP_HEAD" "$tree" | sha256sum | cut -d' ' -f1); fi
+	# the same tree on the same HEAD is the same commit
+	SNAP=$(GIT_AUTHOR_NAME=zfs-repro-try GIT_AUTHOR_EMAIL=try@localhost GIT_AUTHOR_DATE='@0 +0000' \
+	    GIT_COMMITTER_NAME=zfs-repro-try GIT_COMMITTER_EMAIL=try@localhost GIT_COMMITTER_DATE='@0 +0000' \
+	    tgit commit-tree "$tree" -p "$SNAP_HEAD" -m "try: working tree of $top${SNAP_DIFF:+ (diff sha256 $SNAP_DIFF)}")
+	tgit update-ref "refs/try/$(printf '%s' "$top" | tr -c 'A-Za-z0-9_.-' '_')" "$SNAP"
+	SNAP_TOP=$top
+	echo "try: snapshot $(printf '%.12s' "$SNAP") of $top: HEAD $(git -C "$top" log -1 --format='%h %s' "$SNAP_HEAD")"
+	if [ -n "$SNAP_DIFF" ]; then
+		echo "try: working tree changes (diff sha256 ${SNAP_DIFF:0:16}):"
+		tgit diff --stat=100 "$SNAP_HEAD" "$SNAP" | sed 's/^/     /'
+	else echo "try: working tree clean (no changes on HEAD)"; fi
+}
+try_tree() {	# DIR: check out $SNAP into DIR/src (only changed files are rewritten)
+	mkdir -p "$1/src"
+	GIT_INDEX_FILE=$1/git-index tgit --work-tree="$1/src" read-tree --reset -u "$SNAP"
+}
+cmd_try() {
+	local id=${1:?usage: builder/build.sh try ID TARGET ZFS-CHECKOUT} t=${2:?usage: builder/build.sh try ID TARGET ZFS-CHECKOUT} co=${3:?usage: builder/build.sh try ID TARGET ZFS-CHECKOUT}
+	local t0 t1 u ru cfg du dk marker short o res it rc tw=$WORK/try log
+	t0=$(date +%s)
+	[ -f "$T/reproducers/$id/reproducer.conf" ] || { echo "try: no reproducer $id" >&2; return 2; }
+	[ "$(tconf "$t" OS)" = Linux ] || { echo "try: $t: only Linux targets" >&2; return 2; }
+	[ -f "$T/reproducers/$id/payload.sh" ] && { echo "try: $id has a payload.sh, which try doesn't build yet" >&2; return 2; }
+	targets_of "$id" | grep -qxF "$t" || echo "try: note: $t is not one of $id's targets ($(targets_of "$id" | tr '\n' ' '))"
+	try_snapshot "$co" || return 2
+	TRY=1 DEMOS=$tw/demos BUILDS=$tw/builds RUNS=$tw/runs
+	unset RESULTS_FILE
+	short=$(printf '%.12s' "$SNAP")
+	marker="$short try: $(git -C "$SNAP_TOP" rev-parse --short=12 "$SNAP_HEAD") + $([ -n "$SNAP_DIFF" ] && echo "working tree changes ${SNAP_DIFF:0:12}" || echo "no changes") (UNPUBLISHED)"
+	RESOLVED[$id]=1 RESOLVED[$id/try]="worktree@$SNAP" RESOLVED[$id/repro]= RESOLVED[$id/fixed]=
+	# the shared layers (cached)
+	u=$(userland_of "$t") ru=$(root_userland "$id" "$t")
+	cmd_userland "$u" >/dev/null; cmd_kernel "$t" >/dev/null
+	if [ "$(rbase "$id")" = ext ]; then cmd_kernel_ext "$t" >/dev/null; fi
+	cmd_userland_any "$ru" >/dev/null
+	# the OpenZFS build: persistent trees, built in place
+	EXTRA=$(rextra "$id") cfg=$(rconf "$id" CONFIGURE)
+	du=$tw/zfs/user-$u-$(cfgtag "$EXTRA" $cfg) dk=$tw/zfs/kmod-$t-$(kver "$t")-$(cfgtag $cfg)
+	t1=$(date +%s)
+	(
+		flock 9
+		try_tree "$du" && try_tree "$dk" || exit 1
+		# shellcheck disable=SC2086
+		inb "u-$u" bash /src/builder/in/zfs-tree.sh user "/work/${du#"$WORK"/}/src" "/work/${du#"$WORK"/}" "$marker" $cfg || exit 1
+		# shellcheck disable=SC2086
+		inb "$t" bash /src/builder/in/zfs-tree.sh kmod "/work/${dk#"$WORK"/}/src" "/work/${dk#"$WORK"/}" "$marker" $cfg || exit 1
+	) 9>"$tw/zfs.lock" || { echo "try: the OpenZFS build failed (logs: $du/*.log, $dk/*.log)" >&2; return 2; }
+	echo "try: OpenZFS built in $(( $(date +%s) - t1 ))s"
+	# the demo disk; KIND=zts: the ZTS scripts of the snapshot
+	mkdir -p "$tw/resolved" "$tw/zts"
+	tgit archive --format=tar "$SNAP" tests/zfs-tests tests/test-runner/include tests/runfiles >"$tw/zts/$(idtag "$id").tar"
+	res=$tw/resolved/$(idtag "$id").conf
+	{
+		echo "# $id: builder/build.sh try, $(date -u +%FT%TZ)"
+		echo "BUILD_try=$(q "/work/try/zts/$(idtag "$id").tar")"
+		echo "COMMIT_try=$(q "$marker")"
+		echo "UNPUBLISHED=$(q "worktree $SNAP_HEAD${SNAP_DIFF:+ diff $SNAP_DIFF}")"
+	} >"$res"
+	inb "$(ubuilder "$ru")" bash /src/builder/in/demo-disk.sh "$id" "/src/reproducers/$id" "/work/userlands/$ru" "/work/try/demos/$id" "/work/try/resolved/$(idtag "$id").conf" >/dev/null ||
+	    { echo "try: the demo disk failed" >&2; return 2; }
+	# the build disk
+	o=$BUILDS/$id/$t/try; mkdir -p "$o"
+	inb "u-$u" bash /src/builder/in/build-disk.sh try "/work/${du#"$WORK"/}/pkg" "/work/${dk#"$WORK"/}/pkg" "/work/${o#"$WORK"/}" "/work/targets/$t" ||
+	    { echo "try: the build disk failed" >&2; return 2; }
+	{
+		echo "# the OpenZFS build of this image (builder/build.sh try: UNPUBLISHED, a local working tree)"
+		echo "LABEL='try'"
+		echo "TARGET=$(q "$t")"
+		echo "KERNEL=$(q "$(tconf "$t" KERNEL)")"
+		echo "BUILD=$(q "worktree@$SNAP")"
+		echo "SPEC=''"
+		echo "MARKER=$(q "$marker")"
+		echo "ZFS=$(q "$(sed -n 2p "$dk/pkg/build.txt")")"
+		echo "EXPECT='' EXPECT_INSPECT='' RUNS='' MIN_MATCH=''"
+		echo "TAG=$(q "$(tag_of "$id" try "$t")")"
+		echo "UNPUBLISHED=$(q "worktree $SNAP_HEAD${SNAP_DIFF:+ diff $SNAP_DIFF}")"
+		echo "WORKTREE_BASE=$(q "$SNAP_HEAD")"
+		echo "WORKTREE_DIFF=$(q "$SNAP_DIFF")"
+	} >"$o/build.conf"
+	{
+		echo "The OpenZFS build 'try' of $id on target $t ($(tconf "$t" KERNEL)): UNPUBLISHED."
+		echo "It was built by builder/build.sh try from a local working tree: HEAD $SNAP_HEAD"
+		echo "${SNAP_DIFF:+plus uncommitted changes (diff sha256 $SNAP_DIFF)}"
+		echo "configure $cfg"
+	} >"$o/SOURCES.txt"
+	rm -f "$o/patches"/*.patch 2>/dev/null; rmdir "$o/patches" 2>/dev/null || true
+	cmd_images "$id" "$t" | grep -v '^image .*:\(runtime\|userland\|kernel\)-' || true
+	echo "try: image built in $(( $(date +%s) - t0 ))s; running it"
+	# run it, as check does
+	log=$tw/last-$(idtag "$id")-$t.log
+	cmd_check "$id" "$t" try | tee "$log" || true
+	it=$(grep -a -E '^(RESULT |PANIC: |no RESULT line|SUMMARY )' "$log" | tail -1)
+	echo "try: $(img_of "$id" try "$t") (local only)"
+	echo "try: build $marker"
+	echo "try: ${it:-no RESULT}"
+	echo "try: $(( $(date +%s) - t0 ))s from the snapshot to the RESULT"
+	case $it in 'RESULT OK'*) rc=0 ;; 'RESULT BUG'* | PANIC*) rc=1 ;; SUMMARY*' BUG 0, ERROR 0, PANIC 0, OTHER 0;'*) rc=0 ;; SUMMARY*) rc=1 ;; *) rc=2 ;; esac
+	return $rc
+}
+
 cmd_push() {	# ID TARGET [LABEL...]
-	local id=$1 t=$2 l; shift 2
+	local id=$1 t=$2 l u; shift 2
 	local ls=("$@"); [ ${#ls[@]} -gt 0 ] || read -ra ls <<<"$(labels "$id" | tr '\n' ' ')"
+	for l in "${ls[@]}"; do
+		# never a `try` image: a local working tree is not a public commit
+		[ "$l" = try ] && { echo "push: refusing $id $l: a try image (a local working tree) is never published" >&2; return 1; }
+		u=$($PODMAN image inspect -f '{{index .Labels "io.github.wrouesnel.zfs-repro.unpublished"}}' "$(img_of "$id" "$l" "$t")" 2>/dev/null) || u=
+		case $u in '' | '<no value>') ;; *) echo "push: refusing $(img_of "$id" "$l" "$t"): built from an unpublished working tree ($u)" >&2; return 1 ;; esac
+	done
 	for l in "${ls[@]}"; do $PODMAN push -q "$(img_of "$id" "$l" "$t")"; echo "pushed $(img_of "$id" "$l" "$t")"; done
 }
 
@@ -829,6 +987,7 @@ zfs-kmod) cmd_zfs kmod "$@" ;;
 zfs-for) cmd_zfs_for "$@" ;;
 zdir) d=$(zdir "$@"); echo "${d#"$WORK"/}" ;;
 check) cmd_check "$@" ;;
+try) cmd_try "$@" ;;
 tag) tag_of "$@" ;;
 targets) targets_of "$@" ;;
 ids) all_ids ;;

@@ -19,24 +19,33 @@
 # come with each build (TOOLS: the ones the tests use, or '@zts' for all).
 # RESOLVED: the file with the commits BUILD_repro and BUILD_fixed resolved to
 # (builder/build.sh resolve); without it they must be pins (REPO@SHA).
+# `builder/build.sh try` (a local working tree) writes BUILD_try instead: a
+# tar of the tree's tests/ (under /work), and COMMIT_try, its description;
+# its scripts go to ROOT/zts/try/.
 set -euo pipefail
 RC=${1:?reproducer.conf} R=${2:?root} RES=${3:-${1}}
 conf() { (set +u; . "$1"; eval "printf '%s' \"\${$2:-}\""); }
 TESTS=$(conf "$RC" ZTS_TESTS)
 [ -n "$TESTS" ] || { echo "KIND=zts needs ZTS_TESTS" >&2; exit 1; }
 W=$(mktemp -d /tmp/zts.XXXXXX)
-for L in repro fixed; do
+for L in repro fixed try; do
 	rs=$(conf "$RES" "BUILD_$L"); [ -n "$rs" ] || continue
+	G=$W/$L O=$R/zts/$L
+	if [ "$L" = try ]; then
+		# a working tree (builder/build.sh try): its tests, as a tar
+		mkdir -p "$G"; tar -C "$G" -xf "$rs"
+	else
 	# ZTS_SCRIPTS=fixed: both builds run the fix head's scripts (a branch
 	# whose test came with, or after, the fix)
 	[ "$(conf "$RC" ZTS_SCRIPTS)" = fixed ] && rs=$(conf "$RES" BUILD_fixed)
-	repo=${rs%@*} sha=${rs##*@} G=$W/$L O=$R/zts/$L
+	repo=${rs%@*} sha=${rs##*@}
 	git init -q "$G"
 	git -C "$G" remote add origin "$repo"
 	git -C "$G" fetch -q --depth=1 --filter=blob:none origin "$sha"
 	git -C "$G" sparse-checkout set --no-cone /tests/zfs-tests/include /tests/zfs-tests/callbacks \
 	    /tests/zfs-tests/tests /tests/test-runner/include /tests/runfiles
 	git -C "$G" -c advice.detachedHead=false checkout -q "$sha"
+	fi
 	Z=$G/tests/zfs-tests
 	mkdir -p "$O/include" "$O/runner/include" "$O/tests"
 	cp -p "$Z"/include/*.shlib "$Z"/include/*.cfg "$O/include/"
@@ -127,7 +136,8 @@ with open(os.path.join(o, "tests.list"), "w") as fh:
     fh.write("\n".join(lst) + "\n")
 print("zts %s: %d files for %s" % (os.path.basename(o), len(need), " ".join(tests)))
 EOF
-	echo "$(git -C "$G" log -1 --format='%h %s' "$sha")" >"$O/commit"
+	if [ "$L" = try ]; then conf "$RES" COMMIT_try >"$O/commit"; echo >>"$O/commit"
+	else echo "$(git -C "$G" log -1 --format='%h %s' "$sha")" >"$O/commit"; fi
 	find "$O" -name '*.ksh' -exec chmod 755 {} +
 done
 rm -rf "$W"

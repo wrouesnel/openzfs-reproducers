@@ -509,6 +509,66 @@ errors, the devices in the expected state, `errors: No known data errors`,
 and the data verified. The break run must visibly show the damage.
 `wrouesnel/fix-resilver-unreadable-dtl` is an example.
 
+## Iterating on a fix (`try`)
+
+    builder/build.sh try ID TARGET ZFS-CHECKOUT
+
+builds reproducer ID's demo against the OpenZFS source in a local git
+checkout, as its working tree is now, and runs it the way `check` does. It
+is for people working on a fix: check out the branch with the failing test,
+`try` prints `RESULT BUG`; edit the source (no commit needed), `try` again,
+and it prints `RESULT OK` once the fix works. Exit status: 0 for `RESULT OK`
+(with `CHECK_ARGS='--runs N'`: every run OK), 1 for `RESULT BUG` or a panic,
+2 for anything else (no RESULT, `RESULT ERROR`, a build failure).
+
+**The snapshot.** The checkout is only read. Its working tree (tracked files
+as they are on disk, and untracked files that `.gitignore` doesn't exclude)
+is snapshotted into a commit object whose parent is the checkout's HEAD:
+`git read-tree HEAD; git add -A; git write-tree` with a temporary index, and
+the new objects written to `work/try/git`, a bare repository that reads the
+checkout's objects through an alternate. The checkout's index, refs, branches
+and files are never written. (Git may refresh the mtime of a loose object of
+the checkout's that the snapshot also contains; that is all.) The same tree
+on the same HEAD always gives the same commit. The build is named after it:
+`<snapshot> try: <HEAD> + working tree changes <diff hash> (UNPUBLISHED)`,
+where the diff hash is the sha256 of `git diff --binary HEAD <snapshot>`.
+
+**The build is incremental.** The userland, kernel, builder and runtime
+layers come from the usual caches (`work/userlands`, `work/targets`, the
+builder images). OpenZFS is built in place, by `builder/in/zfs-tree.sh`, in
+two persistent source trees per configuration: `work/try/zfs/user-U-CFG/src`
+(the tools, in the userland's builder) and `work/try/zfs/kmod-T-KERNEL-CFG/src`
+(the modules, in the target's builder). Each run checks the snapshot out into
+them with `git read-tree --reset -u`, which rewrites only the files that
+differ from the last snapshot, so `make` recompiles only what the edit
+touches. `autogen.sh` and `configure` run on the first build of a tree, or
+when `CONFIGURE` or `TOOLS` change. Several checkouts can share the trees
+(switching between them rebuilds what differs). The demo disk is rebuilt
+each time; for `KIND=zts` its ZTS scripts (`/demo/zts/try/`) come from the
+snapshot (`git archive` of `tests/`), so an edited or new test is what runs,
+whatever `ZTS_SCRIPTS` says. Measured with
+`patrickdk77/pr-fallocate-odirect-race` on ubuntu24 (12 cores): the first
+run 359 s to `RESULT BUG` (OpenZFS configure and build 319 s); with the
+fix's three files edited, 69 s to `RESULT OK` (OpenZFS 27 s, image 18 s,
+the test 23 s).
+
+**The image is local and marked unpublished.** It is
+`localhost/openzfs-reproducers:try-USER-SLUG-TARGET-KERNEL` (the repository
+is `ZFS_REPRO_TRY_IMAGE`), with label `try`, no expected RESULT (`--info`
+shows what the repro and fixed images expect) and the labels
+`io.github.wrouesnel.zfs-repro.unpublished` (`worktree HEAD diff HASH`),
+`.worktree-base` and `.worktree-diff`; `build` is `worktree@SNAPSHOT`.
+`builder/build.sh push` refuses any image with the `unpublished` label (and
+the label `try`), and `scripts/build-local.sh` refuses `try` builds; `verify`
+is unchanged, so nothing from a working tree can be published. Outputs are
+under `work/try/` (`last-USER-SLUG-TARGET.log` is the last run's output, the
+OpenZFS build logs are next to each source tree), run disks under
+`work/try/runs/`.
+
+Limits: Linux targets only; a reproducer with a `payload.sh` isn't supported
+yet. The VM banner names the build by its marker (it says "the fix
+(fixed)" for any label but repro).
+
 ## Targets and the userland
 
 `bases/TARGET/base.conf` is a target: a kernel. `FAMILY` picks the builder

@@ -60,6 +60,8 @@ for t in "${ts[@]}"; do
 		fi
 		need= why= wbase=$($B base "$id" "$t")
 		while read -r l want _; do
+			# never a `builder/build.sh try` build (a local working tree)
+			case $l:$want in try:* | *:worktree@*) log "REFUSED $id $t: $l is an unpublished working-tree build"; continue 2 ;; esac
 			tag=$($B tag "$id" "$l" "$t")
 			IFS=$'\t' read -r have hbase <<<"$(pub_labels "$tag")"
 			[ "$have" = "$want" ] || { need=1; why="$why $l: ${have:-not on GHCR} -> ${want#https://github.com/}"; }

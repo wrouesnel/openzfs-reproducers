@@ -272,6 +272,32 @@ CHECK_ARGS='--runs 20 --parallel 4' builder/build.sh check ID TARGET   # a flaky
 the same steps. The outputs go to `work/` (gitignored), and everything is
 cached by what it is made of.
 
+## Iterating on a fix
+
+A reproducer can also be run against your own OpenZFS source, edits
+included, without committing or pushing anything:
+
+```sh
+git clone https://github.com/openzfs/zfs ~/zfs && cd ~/zfs
+git fetch https://github.com/wrouesnel/zfs zts-pr19344-repro && git checkout FETCH_HEAD   # the test, without the fix
+cd ~/openzfs-reproducers
+builder/build.sh try patrickdk77/pr-fallocate-odirect-race ubuntu24 ~/zfs   # RESULT BUG
+$EDITOR ~/zfs/module/os/linux/zfs/zpl_file.c          # fix it (uncommitted is fine)
+builder/build.sh try patrickdk77/pr-fallocate-odirect-race ubuntu24 ~/zfs   # RESULT OK
+```
+
+`try ID TARGET CHECKOUT` snapshots the checkout's working tree (it never
+changes the checkout, its index or its branches), builds OpenZFS from it for
+TARGET, builds the reproducer's demo (a ZTS reproducer runs the tests from
+the same tree, so an edited test is used too), boots it and prints the
+RESULT; it exits 0 for `RESULT OK` and 1 for `RESULT BUG`. The first run
+configures and builds OpenZFS (about 6 minutes on 12 cores); after an edit
+only the changed files are recompiled and the rest is cached, so an edit to
+the RESULT takes about a minute plus the demo's own run time. Its image,
+`localhost/openzfs-reproducers:try-USER-SLUG-TARGET-KERNEL`, stays on your
+machine: it is labelled as an unpublished working tree and is never pushed.
+Details: [docs/reproducer-format.md](docs/reproducer-format.md#iterating-on-a-fix-try).
+
 ## FreeBSD
 
 CI builds Linux targets only. FreeBSD targets boot through SeaBIOS, gptboot

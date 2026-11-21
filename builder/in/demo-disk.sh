@@ -35,6 +35,11 @@ inext() { [ -f "$UD/bins" ] && grep -qxF "$1" "$UD/bins"; }
 			echo "SPEC_$l=$(q "$(conf "$RC" "BUILD_$l")")"
 			echo "BUILD_$l=$(q "$(conf "$RES" "BUILD_$l")")"
 		done
+		# builder/build.sh try: a local working tree, not a public commit
+		if [ -n "$(conf "$RES" BUILD_try)" ]; then
+			echo "BUILD_try=$(q "$(conf "$RES" COMMIT_try)")"
+			echo "UNPUBLISHED=$(q "$(conf "$RES" UNPUBLISHED)")"
+		fi
 	fi
 	echo "ID=$(q "$ID")"
 	echo "USERLAND=$(q "$(conf "$UD/userland.conf" NAME)")"
@@ -52,6 +57,7 @@ if [ "$KIND" = zts ]; then
 	{
 		cat "$(dirname "$0")/zts-run.sh"
 		l=fixed; [ -f "$R/zts/fixed/tests.list" ] || l=repro
+		[ -f "$R/zts/$l/tests.list" ] || l=try
 		echo; echo "# The tests, as the $l build has them ($(cat "$R/zts/$l/commit"))."
 		while read -r d t pre post to; do
 			echo; echo "# ======== $d/$t.ksh (pre: $pre, post: $post, timeout ${to}s)"; echo
@@ -185,6 +191,7 @@ for f in inspect.sh host.sh; do [ -f "$RD/$f" ] && cp "$RD/$f" "$O/"; done
 		while read -r t p d; do [ -f "$d/SOURCES.txt" ] && { echo "  $t/$p:"; sed 's/^/    /' "$d/SOURCES.txt"; }; done <"$PL"
 	fi
 	[ -f "$R/zts/repro/tests.list" ] && echo "ZTS scripts: /demo/zts/LABEL, from each build's commit (CDDL-1.0): $(cat "$R"/zts/*/commit | tr '\n' ';')"
+	[ -f "$R/zts/try/tests.list" ] && echo "ZTS scripts: /demo/zts/try, from an UNPUBLISHED local working tree (CDDL-1.0): $(cat "$R/zts/try/commit")"
 } >"$O/SOURCES.txt"
 du -sh "$R" | sed 's/^/demo tree: /'
 rm -rf "$W"
