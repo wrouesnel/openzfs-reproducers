@@ -1,0 +1,5 @@
+# from the userland builder (util-linux): flock, which the zedlets' zed_lock
+# (zed-functions.sh) takes the debug log's lock with (ZTS commands.cfg lists
+# it; without flock all-debug.sh fails its lock and runs differently from CI).
+# v5's tests don't pin ZED to a CPU, so v3's taskset is gone.
+flock
