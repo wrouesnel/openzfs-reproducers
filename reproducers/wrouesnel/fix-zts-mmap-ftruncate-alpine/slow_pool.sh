@@ -74,7 +74,7 @@ while :; do
 	echo "slow_pool: mmap_ftruncate (pid $pid), sampled every ~$iv ms ($n samples):" \
 	    "whole run $(sec $((te - tf))) s;" \
 	    "creating, mapping and dirtying its pages$([ -n "$sfr0" ] && echo ", starting writeback") $(sec $((tb - tf))) s$sf;" \
-	    "the final ftruncate(fd, 0) and exit at most $(sec $((te - tb))) s, $blk"
+	    "the final ftruncate(fd, 0), munmap and exit at most $(sec $((te - tb))) s, $blk"
 	echo "slow_pool: the limits: master's test, the whole run under 90 s;" \
 	    "the fixed test, ftruncate(fd, 0) under 90000 ms"
 	echo "slow_pool: injection cleared"

@@ -14,12 +14,13 @@ The image runs `mmap_ftruncate` as the ZTS runner does (KIND=zts), with
 every I/O to the pool is delayed 200 ms, one at a time (`zinject -D 200:1`),
 which stands in for the slow runner. `slow_pool.sh` also times the program
 from outside (it samples `/proc/PID/stat` and `/proc/PID/syscall` about every 10 ms). Just before the
-RESULT it prints the whole run against the time spent in the final
-`ftruncate(fd, 0)`.
+RESULT it prints the whole run against an upper bound on the final
+`ftruncate(fd, 0)`: from the last sample that saw the program dirtying
+pages (or in `sync_file_range()`) to its exit.
 
 - repro (master's test): the whole run takes about 123 s, so `test 123 -lt 90`
-  fails and the test FAILs. The final `ftruncate(fd, 0)` and exit took a few
-  tens of ms at most, and the call was never seen blocked.
+  fails and the test FAILs. The final `ftruncate(fd, 0)`, munmap and exit
+  took about 0.2 s at most, and the call was never seen blocked in it.
 - fixed ([fix-zts-mmap-ftruncate-alpine](https://github.com/wrouesnel/zfs/tree/fix-zts-mmap-ftruncate-alpine)):
   the test starts writeback of its 256M explicitly, times only
   `ftruncate(fd, 0)` (tens of ms) against 90000 ms, checks that the
