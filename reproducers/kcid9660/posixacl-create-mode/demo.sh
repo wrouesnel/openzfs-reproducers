@@ -9,7 +9,8 @@
 #   #19960 (kcid9660/posixacl-setfacl-mode): the mode setfacl sets on an
 #          existing file (zpl_set_posix_acl): acl
 # The same demo is in both reproducers; /demo/focus says which half this
-# image's RESULT is about (create or setfacl).  The other half is reported
+# image's RESULT is about (create or setfacl; both: #19959 now carries
+# #19960's fix too, so its RESULT covers both).  The other half is reported
 # on its own line.
 #
 # Per case: a pool on a file, umask 022, a file "acl" and a directory
@@ -22,7 +23,7 @@
 set -u
 . /etc/demo-env 2>/dev/null
 FOCUS=$(cat /demo/focus 2>/dev/null)
-case $FOCUS in create | setfacl) ;; *) echo "RESULT ERROR: /demo/focus is '$FOCUS'"; exit 2 ;; esac
+case $FOCUS in create | setfacl | both) ;; *) echo "RESULT ERROR: /demo/focus is '$FOCUS'"; exit 2 ;; esac
 P=aclrepro IMG=/var/tmp/aclrepro.img
 NAMES="file dir inherit/file acl"
 # what each case asks for, and the mode it must have (umask 022; the
@@ -30,13 +31,13 @@ NAMES="file dir inherit/file acl"
 declare -A REQ=([file]="open 0666" [dir]="mkdir 0777" [inherit/file]="open 0666, default ACL" [acl]="0644, then setfacl")
 declare -A WANT_posix=([file]=644 [dir]=755 [inherit/file]=664 [acl]=640)
 declare -A WANT_off=([file]=644 [dir]=755 [inherit/file]=644 [acl]=644)
-half() { case $1 in acl) echo setfacl ;; *) echo create ;; esac; }
+half() { [ "$FOCUS" = both ] && { echo both; return; }; case $1 in acl) echo setfacl ;; *) echo create ;; esac; }
 x() { echo "# $*"; "$@"; }
 modes() { local n; for n in $NAMES; do printf '%s=%s ' "$n" "$(stat -c %a "/$P/$n")"; done; }
 mode_of() { local w; for w in $1; do [ "${w%%=*}" = "$2" ] && echo "${w#*=}"; done; return 0; }
 
 echo "=== openzfs/zfs#19958: acltype=posix modes after ZIL replay ($DEMO_BUILD build: $(head -1 /etc/zfshunt-build))"
-echo "    this image's RESULT is about the $FOCUS half ($([ "$FOCUS" = create ] && echo '#19959: modes set at create' || echo '#19960: the mode setfacl sets'))"
+echo "    this image's RESULT is about $([ "$FOCUS" = both ] && echo 'both halves' || echo "the $FOCUS half") ($(case $FOCUS in create) echo '#19959: modes set at create' ;; setfacl) echo '#19960: the mode setfacl sets' ;; both) echo '#19959: modes set at create and the mode setfacl sets' ;; esac))"
 declare -A BAD OTHER
 ctl_bad= setup_bad=
 for xa in sa dir; do
@@ -89,16 +90,17 @@ done
 rm -f $IMG
 echo
 if [ "$FOCUS" = create ]; then what="modes set at create (file, dir, inherit/file)" other="the setfacl mode (acl, #19960's half)"
+elif [ "$FOCUS" = both ]; then what="modes set at create (file, dir, inherit/file) and the mode setfacl sets (acl)"
 else what="the mode setfacl sets (acl)" other="the modes set at create (file, dir, inherit/file, #19959's half)"; fi
 ostate="kept"; [ -n "${OTHER[sa]:-}${OTHER[dir]:-}" ] && ostate="CHANGED: xattr=sa ${OTHER[sa]:-kept, }xattr=dir ${OTHER[dir]:-kept, }" && ostate=${ostate%, }
-echo "# other half, $other: $ostate"
+[ "$FOCUS" = both ] || echo "# other half, $other: $ostate"
 if [ -n "$setup_bad" ]; then
 	echo "RESULT ERROR: a mode was not what the case sets before the export:$setup_bad"; exit 2
 elif [ -n "$ctl_bad" ]; then
 	echo "RESULT ERROR: the acltype=off control changed:$ctl_bad"; exit 2
 elif [ -n "${BAD[sa]:-}${BAD[dir]:-}" ]; then
 	d="xattr=sa ${BAD[sa]:-kept, }xattr=dir ${BAD[dir]:-kept, }"
-	echo "RESULT BUG: acltype=posix: $what came back wrong after ZIL replay: ${d%, } (other half: $( [ "$ostate" = kept ] && echo kept || echo CHANGED))"
+	echo "RESULT BUG: acltype=posix: $what came back wrong after ZIL replay: ${d%, } $( [ "$FOCUS" = both ] || { [ "$ostate" = kept ] && echo '(other half: kept)' || echo '(other half: CHANGED)'; })"
 else
-	echo "RESULT OK: acltype=posix: $what came back after ZIL replay (xattr=sa and xattr=dir; acltype=off control kept) (other half: $( [ "$ostate" = kept ] && echo kept || echo 'still CHANGED, fixed by the other PR'))"
+	echo "RESULT OK: acltype=posix: $what came back after ZIL replay (xattr=sa and xattr=dir; acltype=off control kept) $( [ "$FOCUS" = both ] || { [ "$ostate" = kept ] && echo '(other half: kept)' || echo '(other half: still CHANGED, fixed by the other PR)'; })"
 fi
