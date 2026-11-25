@@ -58,6 +58,7 @@ if [ "$MODE" = user ]; then
 	for t in zpool zfs zdb zinject zhack zstream ${EXTRA:-}; do
 		if [ -e "$S/usr/sbin/$t" ]; then cp -L "$S/usr/sbin/$t" "$Kp/sbin/"
 		elif [ -e "$S/usr/bin/$t" ]; then cp -L "$S/usr/bin/$t" "$Kp/sbin/"
+		elif [ -e "$S/usr/libexec/zfs/$t" ]; then cp -L "$S/usr/libexec/zfs/$t" "$Kp/sbin/"	# zpool_influxdb
 		elif [ -e "$S/usr/share/zfs/zfs-tests/bin/$t" ]; then cp -L "$S/usr/share/zfs/zfs-tests/bin/$t" "$Kp/sbin/"	# a ZTS helper
 		else echo "no $t in this build"; fi
 	done
