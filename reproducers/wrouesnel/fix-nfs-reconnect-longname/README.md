@@ -48,9 +48,8 @@ About 45 seconds per run.
 | build | RESULT | client |
 |---|---|---|
 | master 74215dc630 | `RESULT BUG` 3/3 (`--check`) | `[Errno 116] Stale file handle` |
-| fix 0420243a61 | `RESULT OK` 3/3 (`--check`) | fstat and read succeed; `dirent_name`: cookie_hits +2, searches +1 |
+| fix d7c5e92715 | `RESULT OK` 3/3 (`--check`) | fstat and read succeed; `dirent_name`: cookie_hits +2, searches +1 |
 
-The ZTS test on the branch (`exportfs_reconnect_file_longname`) checks the
-same through `open_by_handle_at()` of an `AT_HANDLE_CONNECTABLE` handle
-(Linux 6.13 and later), and the unit test `zap.zap_value_search_toolong`
-checks `zap_value_search()` itself.
+The ZTS test on the branch (`exportfs_reconnect_file_longname`, Linux)
+checks the same over loopback NFSv3 with `subtree_check`, and the unit
+test `zap.zap_value_search_toolong` checks `zap_value_search()` itself.
