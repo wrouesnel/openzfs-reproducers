@@ -1,5 +1,5 @@
 #!/bin/bash
-# demo.sh -- wrouesnel/fix-rollback-stale-mountpoint-v2 (follow-up to
+# demo.sh -- wrouesnel/fix-rollback-stale-mountpoint-v4 (follow-up to
 # openzfs/zfs#12460, Linux).
 # POOL/par is snapshotted, then POOL/par/child is created (its mountpoint
 # directory is not in the snapshot) and gets a file.  POOL/par is rolled
