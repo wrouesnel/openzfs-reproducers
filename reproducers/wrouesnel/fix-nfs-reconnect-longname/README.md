@@ -47,8 +47,8 @@ About 45 seconds per run.
 
 | build | RESULT | client |
 |---|---|---|
-| master 74215dc630 | `RESULT BUG` 3/3 (`--check`) | `[Errno 116] Stale file handle` |
-| fix d7c5e92715 | `RESULT OK` 3/3 (`--check`) | fstat and read succeed; `dirent_name`: cookie_hits +2, searches +1 |
+| master 3b6d727ddd | `RESULT BUG` 3/3 (`--check`) | `[Errno 116] Stale file handle` |
+| fix f5d0006616 | `RESULT OK` 3/3 (`--check`) | fstat and read succeed; `dirent_name`: cookie_hits +2, searches +1 |
 
 The ZTS test on the branch (`exportfs_reconnect_file_longname`, Linux)
 checks the same over loopback NFSv3 with `subtree_check`, and the unit
