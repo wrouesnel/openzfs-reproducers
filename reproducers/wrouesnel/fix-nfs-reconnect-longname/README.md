@@ -43,12 +43,12 @@ matches whose names don't fit, and fails only if none does.
 
 About 45 seconds per run.
 
-## Results (2026-11-27, local `try` builds, ubuntu24 6.8.0-142-generic)
+## Results (2026-11-27, ubuntu24 6.8.0-142-generic, published images)
 
 | build | RESULT | client |
 |---|---|---|
-| master 74215dc630 | `RESULT BUG` | `[Errno 116] Stale file handle` |
-| fix 315986240b | `RESULT OK` | fstat and read succeed; `dirent_name`: cookie_hits +2, searches +1 |
+| master 74215dc630 | `RESULT BUG` 3/3 (`--check`) | `[Errno 116] Stale file handle` |
+| fix 0420243a61 | `RESULT OK` 3/3 (`--check`) | fstat and read succeed; `dirent_name`: cookie_hits +2, searches +1 |
 
 The ZTS test on the branch (`exportfs_reconnect_file_longname`) checks the
 same through `open_by_handle_at()` of an `AT_HANDLE_CONNECTABLE` handle
