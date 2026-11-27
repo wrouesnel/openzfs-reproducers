@@ -1,7 +1,9 @@
 #!/bin/bash
 # demo.sh -- wrouesnel/fix-send-taskq-killable (openzfs/zfs#12500).
-# Both builds have the small-stack send path forced on (USE_SEND_TASKQ: the
-# stream is written on a "z_send" taskq thread).  A 32 MiB snapshot is sent
+# The send taskq path is used only on kernels with small stacks (32-bit
+# arm, i386).  For this demo both builds force it on x86_64 (a DEMO ONLY
+# commit on top of each: USE_SEND_TASKQ, the stream is written on a
+# "z_send" taskq thread); without the force x86_64 never takes this path.  A 32 MiB snapshot is sent
 # into a FIFO whose reader never reads, so the send blocks on the full pipe.
 # The send gets SIGKILL:
 #   master: it stays in D state (taskq_wait) and its snapshot can't be
@@ -16,7 +18,7 @@ die() { echo "RESULT ERROR: $*"; exit 2; }
 alive() { [ -e /proc/$1/stat ] && [ "$(awk '{ print $3 }' /proc/$1/stat)" != Z ]; }
 state() { alive $1 && echo "state $(awk '{ print $3 }' /proc/$1/stat) in $(cat /proc/$1/wchan 2>/dev/null)" || echo "exited"; }
 
-echo "=== killing a blocked zfs send ($DEMO_BUILD build: $(head -1 /etc/zfshunt-build), kernel $(uname -r))"
+echo "=== killing a blocked zfs send, small-stack send taskq path forced on x86_64 for this demo ($DEMO_BUILD build: $(head -1 /etc/zfshunt-build), kernel $(uname -r))"
 zpool destroy $P 2>/dev/null
 x zpool create -f -o cachefile=none $P $DEMO_DISK || die "zpool create failed"
 x zfs create $P/fs
@@ -54,10 +56,10 @@ x zpool export $P
 rm -f $F
 echo
 if [ "$after" != exited ]; then
-	echo "RESULT BUG: zfs send survived SIGKILL ($after, 10 s later; z_send taskq: $tq) and its snapshot could not be destroyed: ${dout:-exit $drc}"
+	echo "RESULT BUG: with the small-stack send taskq path forced on x86_64, zfs send survived SIGKILL ($after, 10 s later; z_send taskq: $tq) and its snapshot could not be destroyed: ${dout:-exit $drc}"
 	exit 1
 elif [ $drc = 0 ]; then
-	echo "RESULT OK: zfs send exited after SIGKILL (z_send taskq: $tq), and its snapshot was destroyed with the reader still there"
+	echo "RESULT OK: with the small-stack send taskq path forced on x86_64, zfs send exited after SIGKILL (z_send taskq: $tq), and its snapshot was destroyed with the reader still there"
 else
 	echo "RESULT ERROR: zfs send exited, but zfs destroy failed: $dout"; exit 2
 fi
