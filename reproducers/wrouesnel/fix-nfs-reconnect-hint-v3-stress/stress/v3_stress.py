@@ -650,9 +650,11 @@ def longname():
     os.mkdir(mnt + "/p/short")
     check_tree(sec, ds, mnt)
     # A name longer than the kernel's 256-byte get_name buffer can't be
-    # reconnected: master's search gives ESTALE; the branch returns
-    # ENAMETOOLONG from the cookie (counted as a hit), so ESTALE or
-    # ENAMETOOLONG is right, and no search.  Short names must be exact.
+    # reconnected: master's search gives ESTALE.  On the branch the cookie
+    # finds the entry (a hit), its name doesn't fit, so one search looks for
+    # another link that does (openzfs/zfs#20043); these directories have
+    # none, so ESTALE or ENAMETOOLONG is right, after exactly one search.
+    # Short names must be exact, with no search.
     bad = 0
     for rel in ("p/" + long, "p/" + long + "/child", "p/short"):
         fh = handle(mnt + "/" + rel)
@@ -667,13 +669,14 @@ def longname():
             ok = got == mnt + "/" + rel and k["searches"] == 0
         else:
             ok = got is None and err in (errno.ESTALE, errno.ENAMETOOLONG) \
-                and k["searches"] == 0
+                and k["searches"] == 1
         bad += not ok
         note("%s %s: got %s errno %d (%s) kstats %s" %
              ("ok " if ok else "BAD", rel[:20] + "...", (got or "")[-30:],
               err, os.strerror(err) if err else "-", k))
     result(sec, bad == 0, "long-name reconnects: ESTALE/ENAMETOOLONG for "
-           "names over 255 bytes, exact path for the short one, no search; "
+           "names over 255 bytes after one search for a shorter link, exact "
+           "path for the short one with no search; "
            "%d bad" % bad)
     zdb_b(sec)
 

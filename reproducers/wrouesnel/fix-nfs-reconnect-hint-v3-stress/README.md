@@ -30,7 +30,7 @@ every test in this order):
 | `links` | 300 files with 3,000 random hard link/unlink operations, 50 renames over existing files, a rename over an empty directory, rmdir and re-create of a parent, `xattr=on` xattr directories: zdb paths right, cookies valid or stale (never inconsistent), reconnects exact |
 | `sendrecv` | full, `-c`, `-L`, `-c -L` and raw `-w` (encrypted) streams, then incrementals after renames: the received cookie states equal the source's (valid, stale, none), reconnects right; `zfs rewrite -N -r` on the receiver makes every cookie valid; a clone with a rename; a rollback |
 | `spill` | `xattr=sa` with legacy, 1k and auto dnodes, 800 files, 4,000 random xattr set/remove/rename operations, then `zfs rewrite -N -r`: no object inconsistent; only objects whose other attributes fill the bonus buffer lack the cookie (the cookie never causes a spill block) |
-| `longname` | `longname=on`, a 300-byte directory name: reconnect gives `ESTALE`/`ENAMETOOLONG` (the kernel's get_name buffer is 256 bytes; master's search gives `ESTALE` too) with no search; a short name is exact |
+| `longname` | `longname=on`, a 300-byte directory name: reconnect gives `ESTALE`/`ENAMETOOLONG` (the kernel's get_name buffer is 256 bytes; master's search gives `ESTALE` too) after one search for a shorter link (openzfs/zfs#20043; there is none); a short name is exact, with no search |
 | `ctldir` | `.zfs/snapshot` directories reopened by file handle: exact paths |
 | `perm` | `zfs rewrite -N` as uid 4242 (`setpriv`): `EACCES` on root's 0755 directory and 0644 file, whose cookies stay `none`; its own directory recorded (`valid`); root succeeds; `EROFS` on a read-only file system |
 
@@ -122,4 +122,6 @@ external pointer table at 400,000 and after the 20,000 removed and reused
 names), the rest as at 0.25. Every test ended with `zdb -b` "No leaks", a
 scrub that repaired 0B with 0 errors, and `errors: No known data errors`.
 Long names: `ESTALE` from the kernel for the 300-byte name and its child,
-counted as cookie hits with no search.
+counted as cookie hits with no search. (Those runs were before the
+openzfs/zfs#20043 fix was stacked on the branch; since then each also
+does one search for a shorter link.)
