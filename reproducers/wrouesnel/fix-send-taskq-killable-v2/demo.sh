@@ -1,5 +1,5 @@
 #!/bin/bash
-# demo.sh -- wrouesnel/fix-send-taskq-killable (openzfs/zfs#12500).
+# demo.sh -- wrouesnel/fix-send-taskq-killable-v2 (openzfs/zfs#12500).
 # The send taskq path is used only on kernels with small stacks (32-bit
 # arm, i386).  For this demo both builds force it on x86_64 (a DEMO ONLY
 # commit on top of each: USE_SEND_TASKQ, the stream is written on a
